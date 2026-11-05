@@ -47,11 +47,19 @@ treated as secrets.
 
 ### Audit
 
-`audit.jsonl` (0600) gets one line per vault access. A line records the outcome of that access (a
-fetch or a write), not of the whole command: argument and input errors that never reach the vault
-are not logged, and a `run` whose key lookup or child fails after a successful fetch stays `ok`.
-The line is written before any value leaves the backend; if it cannot be written, no value is
-released. The format is at the end of this document.
+`audit.jsonl` (0600) gets a line for each value fetch, each write and each refused request. Two
+kinds of vault access are not logged:
+
+- a successful catalog read (`list`, `describe`, `GET /api/v1/entries[/NAME]`, the UI pages): it
+  decrypts the vault but returns no value;
+- a fetch of every entry (`scrub`, `verify-import`, `{"all": true}` on the API) when the vault
+  cannot be loaded: it fails before any line is written. A fetch of named entries logs the load
+  error per entry.
+
+A line records the outcome of the vault access, not of the whole command: argument and input errors
+that never reach the vault are not logged, and a `run` whose key lookup or child fails after a
+successful fetch stays `ok`. The line is written before any value leaves the backend; if it cannot
+be written, no value is released. The format is at the end of this document.
 
 ### Backend seam
 
@@ -64,8 +72,8 @@ masking happen in the CLI on top of the trait, so they behave the same in both m
 
 The config has `identity = "<path>"` (a leading `~` is expanded). The CLI decrypts the vault
 itself. There are no grants, no CSRF header and no reveal reason: on the vault host the owner and
-the owner's agents act as the owner, and each access is audited with `who: "local:$USER"` and
-`via: "local"`. This is deliberate: security applies where it does not get in the way of the owner.
+the owner's agents act as the owner, and their fetches and writes are audited with
+`who: "local:$USER"` and `via: "local"`. This is deliberate: security applies where it does not get in the way of the owner.
 
 ### Remote mode
 
@@ -228,5 +236,5 @@ One JSON object per line:
 | `reason` | The refusal or error message, or the reveal reason. |
 | `notify` | `sent` or `failed`, on a reveal with ntfy configured. |
 
-Reads of the catalog (`list`, `describe`, the UI pages) are not audited when they succeed. No line
-ever carries a value.
+Successful catalog reads and the load failure of a fetch of every entry are not logged (see
+[Audit](#audit)). No line ever carries a value.

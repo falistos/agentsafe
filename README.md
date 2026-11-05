@@ -1,8 +1,10 @@
 # agentsafe
 
 A secrets manager for AI agents. The agent works with entry names and metadata; values only reach
-child processes and rendered files, the output it reads is masked, and every vault access is
-audited.
+child processes and rendered files, the output it reads is masked, and value fetches, writes and
+refused requests are audited. Successful `list` and `describe`, which return no value, are not
+logged, nor is a `scrub` or `verify-import` that fails because the vault cannot be loaded; no
+value is released when its audit line cannot be written.
 
 Values live in one age-encrypted file. The CLI reads it directly on the vault host (local mode),
 or through an `agentsafe serve` on the tailnet that checks each caller's Tailscale grants (remote
@@ -34,7 +36,7 @@ agentsafe render app.env.j2 --allow github > app.env       # value in a 0600 fil
 `init` creates `~/.config/agentsafe/` (0700) with `config.toml` and `identity.txt` (0600) and
 never overwrites them. `$AGENTSAFE_CONFIG` overrides the config path. In local mode the owner's
 agents on the vault host need no grant, header or reason: they act as the owner, and the audit log
-records it.
+records their fetches and writes.
 
 ## Commands
 
@@ -61,10 +63,20 @@ accepted as arguments.
 
 `run` masks the values of the entries named in `--env`, every key of them even when only one key
 is injected. `scrub` masks every entry the caller may get: all of them in local mode, those it has
-`get` on in remote mode. A match becomes `***NAME***`, also when the value appears base64-encoded
-(standard and URL-safe, at the three byte alignments a value can have inside a larger blob),
-hex-encoded (lower and upper case), JSON-escaped or percent-encoded. Matching is streamed with a
-hold-back, so a value split across reads is still masked.
+`get` on in remote mode. A match becomes `***NAME***`. Matching is streamed with a hold-back, so a
+value split across reads is still masked. These spellings of a value are covered, and only these:
+
+- the raw bytes;
+- base64, standard and URL-safe, at the three byte alignments a value can have inside a larger
+  blob;
+- hexadecimal, lower case and upper case;
+- JSON as `serde_json` writes it: `"` and `\` escaped with a backslash, control characters as `\n`,
+  `\t` and the like or `\u00XX`, every other character as is, non-ASCII included;
+- percent-encoding with upper-case hex: every byte except `A-Z a-z 0-9 - . _ ~` as `%XX`.
+
+Other spellings of the same text pass unmasked, for example JSON with `\uXXXX` escapes for
+non-ASCII characters (the default of Python's `json.dumps`) or `\/` for `/`, percent escapes with
+lower-case hex (`%2f`), `+` for a space, or a URL encoder that leaves `/` or `:` as is.
 
 `run` does not mask a value of another entry that the child reads elsewhere, for example from a
 file or its own `agentsafe` call; pipe such output through `agentsafe scrub`.
@@ -90,7 +102,7 @@ Setup, unit file and policy example: [docs/deploy.md](docs/deploy.md). Design an
 is not a sandbox. An agent determined to see a value can still get it, for example by:
 
 - transforming it before printing: hashing, encrypting, reversing, printing it character by
-  character, or an encoding not listed above;
+  character, or an encoding or spelling not listed above;
 - writing it to a file or sending it over the network from inside `agentsafe run`, then reading it
   back outside;
 - `agentsafe render` to a file, then reading the file;

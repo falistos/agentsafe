@@ -1,8 +1,8 @@
 # Threat model
 
 `agentsafe` prevents accidents, not a determined attacker with code execution as the owner. Its
-job is to keep secret values out of what an AI agent reads and repeats, and to make every access
-visible.
+job is to keep secret values out of what an AI agent reads and repeats, and to make value
+fetches, writes and refused requests visible.
 
 ## Assets
 
@@ -10,7 +10,10 @@ visible.
   and, in remote mode, the server.
 - **The age identity** (`identity.txt`, and any offline recovery identity): it decrypts the vault
   and every backup of it.
-- **The audit log** (`audit.jsonl`): its value is that it is complete and unaltered.
+- **The audit log** (`audit.jsonl`): its value is that it records every value fetch, write and
+  refused request, unaltered. It does not record successful catalog reads (`list`, `describe`),
+  nor a fetch of every entry (`scrub`, `verify-import`) that fails because the vault cannot be
+  loaded.
 - **The ntfy URL**: whoever knows the topic can read the reveal notifications or send fake ones.
 - **Metadata** (names, key names, descriptions): stored in plaintext in `catalog.toml`, not
   treated as secret.
@@ -27,14 +30,18 @@ Stops:
 - No command prints a value: `list` and `describe` show names and metadata, `set` and `import` take
   values from stdin or a file, never from arguments.
 - `run` masks the values of the entries it injects in the child's stdout and stderr; `scrub` masks
-  every entry the caller may get, in the encodings listed in the README.
+  every entry the caller may get. Both cover the raw value, base64, hex, JSON as `serde_json`
+  writes it and percent-encoding with upper-case hex (exact spellings in the README).
 - `render` refuses a stdout that is not a regular file and makes it 0600.
 - Error messages never quote a value: `.env` errors give a line number, template errors give the
   kind and the line, a vault that does not parse is reported without its content, API errors never
   echo the request body.
-- Every fetch and write is audited before a value is released.
+- Every value fetch and write is audited, and no value is released when its audit line cannot be
+  written. Successful `list` and `describe` are not logged; they return no value.
 
-Does not stop: a value transformed before printing, written to a file or sent over the network from
+Does not stop: a spelling the masker does not cover, such as JSON `\uXXXX` escapes of non-ASCII
+characters (Python's `json.dumps` default), `\/`, or lower-case percent escapes, all of which an
+ordinary tool can print by accident; a value transformed before printing, written to a file or sent over the network from
 inside `run`, read back from a rendered file, or a value of another entry that the child reads
 elsewhere (`run` does not mask it). In local mode the agent can read `identity.txt`. In remote mode
 it holds the fetched values in memory and can call the API with its host's grants.

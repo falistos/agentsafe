@@ -7,8 +7,9 @@
 The server runs as a dedicated user under systemd on a Linux host, listens on a Unix socket, and
 `tailscale serve` publishes it on the tailnet with the callers' grants.
 
-Requirements: Tailscale 1.92 or later (for `--accept-app-caps`), HTTPS certificates enabled on the
-tailnet (Serve needs them), and an `agentsafe` binary in `/usr/local/bin`.
+Requirements: Tailscale 1.94 or later on the server, HTTPS certificates enabled on the tailnet
+(Serve needs them), and an `agentsafe` binary in `/usr/local/bin`. Tailscale 1.92 brought
+`--accept-app-caps` but rejects a `unix:` target; Serve accepts Unix sockets from 1.94.
 
 ## 1. User, config and identity
 
