@@ -203,6 +203,31 @@ fn verify_import_reports_mismatch_and_unknown_files() {
 }
 
 #[test]
+fn verify_import_reports_unreadable_files_without_mismatch() {
+    let home = Home::new();
+    let src = tempfile::tempdir().unwrap();
+    for name in ["denied", "binary"] {
+        let file = src.path().join(format!("{name}.env"));
+        fs::copy(fixtures().join("app.env"), &file).unwrap();
+        let out = home.agentsafe(&["import", file.to_str().unwrap(), "--name", name]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    }
+    fs::set_permissions(
+        src.path().join("denied.env"),
+        fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    fs::write(src.path().join("binary.env"), b"K=\xff\xfe\n").unwrap();
+    let out = home.agentsafe(&["verify-import", src.path().to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stdout),
+        "binary.env\tbinary\tUNREADABLE (invalid data)\n\
+         denied.env\tdenied\tUNREADABLE (permission denied)\n"
+    );
+}
+
+#[test]
 fn set_list_and_describe_never_show_values() {
     let home = Home::new();
     let value = "sk-fixture-set-value-42";
