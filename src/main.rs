@@ -9,20 +9,22 @@ mod policy;
 mod server;
 mod vault;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::str::FromStr;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use minijinja::syntax::SyntaxConfig;
+use minijinja::value::{Enumerator, Object, Value};
 use minijinja::{Environment, UndefinedBehavior};
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, getpgid, getpgrp, kill_process, waitid};
 use rustix::termios::tcgetpgrp;
@@ -349,8 +351,12 @@ fn store_entry(
             meta: meta.into_patch(source),
         },
     )?;
-    eprintln!("stored {name} ({count} keys)");
+    eprintln!("stored {name} ({})", key_count(count));
     Ok(())
+}
+
+fn key_count(n: usize) -> String {
+    format!("{n} key{}", if n == 1 { "" } else { "s" })
 }
 
 /// Sets one key of an entry and keeps its other keys.
@@ -372,7 +378,7 @@ fn set_key(
             meta: meta.into_patch(None),
         },
     )?;
-    eprintln!("stored {name}: set {key} ({keys} keys)");
+    eprintln!("stored {name}: set {key} ({})", key_count(keys));
     Ok(())
 }
 
@@ -460,6 +466,40 @@ fn child_shares_terminal(child: Pid) -> bool {
         .contains(&Ok(ours))
 }
 
+/// The `secrets` of a template: the allowed entries, remembering which of them it reads.
+struct Secrets {
+    entries: BTreeMap<String, Value>,
+    read: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl fmt::Debug for Secrets {
+    // Entry names only: the values are secret.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.entries.keys()).finish()
+    }
+}
+
+impl Object for Secrets {
+    fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+        let name = key.as_str()?;
+        let entry = self.entries.get(name)?.clone();
+        self.read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_string());
+        Some(entry)
+    }
+
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        Enumerator::Values(
+            self.entries
+                .keys()
+                .map(|k| Value::from(k.as_str()))
+                .collect(),
+        )
+    }
+}
+
 /// If our own output closes, keep draining the child so it is not blocked on a full pipe.
 fn pump(masker: &Masker, mut from: impl Read, to: impl Write) {
     if masker.copy(&mut from, to).is_err() {
@@ -488,6 +528,14 @@ fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>, output: &P
             (name.clone(), values)
         })
         .collect();
+    let read = Arc::new(Mutex::new(BTreeSet::new()));
+    let secrets = Value::from_object(Secrets {
+        entries: ctx
+            .into_iter()
+            .map(|(name, keys)| (name, Value::from_pairs(keys)))
+            .collect(),
+        read: Arc::clone(&read),
+    });
     let mut env = Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Strict);
     env.set_syntax(
@@ -498,7 +546,7 @@ fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>, output: &P
     );
     // Error details can quote rendered values: report only the kind and the line.
     let rendered = env
-        .render_str(&source, BTreeMap::from([("secrets", ctx)]))
+        .render_str(&source, BTreeMap::from([("secrets", secrets)]))
         .map_err(|e| {
             anyhow!(
                 "template error: {} at line {}",
@@ -507,6 +555,19 @@ fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>, output: &P
             )
         })?;
     let rendered = Zeroizing::new(rendered);
+    let read = read.lock().unwrap_or_else(PoisonError::into_inner);
+    let unread: Vec<&str> = fetched
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !read.contains(*name))
+        .collect();
+    if !unread.is_empty() {
+        bail!(
+            "the template does not read {}, which --allow gives it: read a value with \
+             {{{{ secrets[\"NAME\"].KEY }}}}",
+            unread.join(", ")
+        );
+    }
     // A new 0600 file renamed over FILE: a reader of the old file never sees the values, and
     // the mode is right before anything is written.
     write_atomic(output, rendered.as_bytes())
