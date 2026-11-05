@@ -38,9 +38,9 @@ it against `SHA256SUMS`:
 
 ```sh
 target=aarch64-apple-darwin
-curl -LO https://github.com/falistos/agentsafe/releases/latest/download/agentsafe-v0.1.0-$target.tar.gz
+curl -LO https://github.com/falistos/agentsafe/releases/latest/download/agentsafe-v0.1.1-$target.tar.gz
 curl -LO https://github.com/falistos/agentsafe/releases/latest/download/SHA256SUMS
-shasum -a 256 -c SHA256SUMS --ignore-missing && tar -xzf agentsafe-v0.1.0-$target.tar.gz
+shasum -a 256 -c SHA256SUMS --ignore-missing && tar -xzf agentsafe-v0.1.1-$target.tar.gz
 ```
 
 Or build it with Rust 1.89+: `cargo install --locked --git https://github.com/falistos/agentsafe`.
