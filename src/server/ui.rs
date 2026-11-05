@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::{AppState, Ctx, blocking};
-use crate::backend::{Backend, MetaPatch, Put, Refusal, Values};
+use crate::backend::{Backend, Expect, MetaPatch, Put, Refusal, Values};
 use crate::dotenv;
 use crate::policy::Action;
 use crate::vault::{Catalog, CatalogEntry, validate_name};
@@ -153,6 +153,7 @@ impl From<anyhow::Error> for UiError {
         match e.downcast_ref::<Refusal>() {
             Some(r @ Refusal::NotFound(_)) => UiError::new(StatusCode::NOT_FOUND, r.to_string()),
             Some(r @ Refusal::Invalid(_)) => UiError::bad_request(r.to_string()),
+            Some(r @ Refusal::Conflict(_)) => UiError::new(StatusCode::CONFLICT, r.to_string()),
             None => {
                 eprintln!("agentsafe: {e:#}");
                 UiError::new(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
@@ -203,22 +204,20 @@ async fn deny(state: &AppState, ctx: &Ctx, action: &'static str, entry: Option<S
     UiError::new(StatusCode::FORBIDDEN, "Not allowed.")
 }
 
-/// The entries the caller has `admin` on, or a 403 when there is none and the caller is not
-/// admin on `*` either.
+/// The entries the caller has `admin` on, or a 403 when no grant of theirs holds `admin`.
 async fn admin_catalog(
     state: &AppState,
     ctx: &Ctx,
     action: &'static str,
 ) -> Result<Catalog, UiError> {
-    let catalog: Catalog = blocking(state, |b| b.catalog())
+    if !ctx.rights.has_admin() {
+        return Err(deny(state, ctx, action, None).await);
+    }
+    Ok(blocking(state, |b| b.catalog())
         .await?
         .into_iter()
         .filter(|(name, _)| ctx.rights.allows(Action::Admin, name))
-        .collect();
-    if catalog.is_empty() && !admin_everywhere(ctx) {
-        return Err(deny(state, ctx, action, None).await);
-    }
-    Ok(catalog)
+        .collect())
 }
 
 /// A valid name the caller has `admin` on, whether or not the entry exists.
@@ -262,8 +261,8 @@ struct EntryRow {
     name: String,
     description: String,
     owner: String,
-    used_by: String,
-    tags: String,
+    used_by: Vec<String>,
+    tags: Vec<String>,
     rotate_by: String,
     overdue: bool,
     keys: Vec<String>,
@@ -277,8 +276,8 @@ impl EntryRow {
             name,
             description: meta.description.unwrap_or_default(),
             owner: meta.owner.unwrap_or_default(),
-            used_by: meta.used_by.join(", "),
-            tags: meta.tags.join(", "),
+            used_by: meta.used_by,
+            tags: meta.tags,
             rotate_by: meta.rotate_by.map(|d| d.to_string()).unwrap_or_default(),
             overdue: meta.rotate_by.is_some_and(|d| d < today),
             keys: entry.keys,
@@ -337,10 +336,11 @@ struct MetaForm {
 }
 
 impl MetaForm {
-    /// Every field is sent, so an empty one clears it.
+    /// Every field is sent, so an empty one clears it. List items are one per line, so an item
+    /// may contain a comma.
     fn patch(self) -> MetaPatch {
         let list = |s: &str| -> Vec<String> {
-            s.split(',')
+            s.lines()
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(str::to_string)
@@ -405,12 +405,9 @@ async fn replace_values(
         meta: MetaPatch::default(),
     };
     let (caller, target) = (ctx.caller.clone(), name.clone());
+    // A typo in the URL must not create an entry: that is what the new-entry page is for.
     blocking(&state, move |b| {
-        // A typo in the URL must not create an entry: that is what the new-entry page is for.
-        if !b.catalog()?.contains_key(&target) {
-            return Err(Refusal::NotFound(target).into());
-        }
-        b.put_as(&caller, &target, put)
+        b.put_expecting(&caller, &target, put, Expect::Exists)
     })
     .await?;
     Ok(redirect(&name, "values"))
@@ -452,13 +449,7 @@ async fn create(
     };
     let (caller, target) = (ctx.caller.clone(), name.clone());
     blocking(&state, move |b| {
-        if b.catalog()?.contains_key(&target) {
-            return Err(Refusal::Invalid(format!(
-                "{target} already exists: replace its values from its page"
-            ))
-            .into());
-        }
-        b.put_as(&caller, &target, put)
+        b.put_expecting(&caller, &target, put, Expect::Absent)
     })
     .await?;
     Ok(redirect(&name, "created"))

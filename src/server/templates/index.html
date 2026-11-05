@@ -13,7 +13,7 @@
 <td>{{ e.keys | length }}</td>
 <td>{{ e.owner }}</td>
 <td{% if e.overdue %} class="overdue"{% endif %}>{{ e.rotate_by }}</td>
-<td>{{ e.tags }}</td>
+<td>{{ e.tags | join(", ") }}</td>
 </tr>
 {% endfor %}
 </table>

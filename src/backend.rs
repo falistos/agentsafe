@@ -50,6 +50,8 @@ pub enum Selection {
 pub enum Refusal {
     NotFound(String),
     Invalid(String),
+    /// The entry is already there.
+    Conflict(String),
 }
 
 impl fmt::Display for Refusal {
@@ -57,6 +59,7 @@ impl fmt::Display for Refusal {
         match self {
             Refusal::NotFound(name) => write!(f, "no entry named {name}"),
             Refusal::Invalid(why) => f.write_str(why),
+            Refusal::Conflict(name) => write!(f, "{name} already exists"),
         }
     }
 }
@@ -118,6 +121,17 @@ impl MetaPatch {
         }
         Ok(())
     }
+}
+
+/// What a write requires of the entry, checked under the same lock as the write.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Expect {
+    /// Create the entry or change it.
+    Any,
+    /// The entry must already be there.
+    Exists,
+    /// The entry must not be there yet.
+    Absent,
 }
 
 /// New values and/or a metadata change. With no values the entry must already exist.
@@ -251,10 +265,16 @@ impl LocalBackend {
         result
     }
 
-    fn apply_put(&self, name: &str, put: Put) -> Result<()> {
+    fn apply_put(&self, name: &str, put: Put, expect: Expect) -> Result<()> {
         validate_name(name).map_err(|e| Refusal::Invalid(e.to_string()))?;
         self.store.update(|vault| {
-            let entry = match (&put.values, vault.entries.contains_key(name)) {
+            let present = vault.entries.contains_key(name);
+            match expect {
+                Expect::Absent if present => return Err(Refusal::Conflict(name.into()).into()),
+                Expect::Exists if !present => return Err(Refusal::NotFound(name.into()).into()),
+                _ => {}
+            }
+            let entry = match (&put.values, present) {
                 (None, false) => return Err(Refusal::NotFound(name.into()).into()),
                 (Some(values), _) if values.is_empty() => {
                     return Err(Refusal::Invalid("no KEY=VALUE pairs given".into()).into());
@@ -384,8 +404,19 @@ impl LocalBackend {
     }
 
     pub fn put_as(&self, caller: &Caller, name: &str, put: Put) -> Result<()> {
+        self.put_expecting(caller, name, put, Expect::Any)
+    }
+
+    /// `put_as`, refused as a conflict or a missing entry when `expect` does not hold.
+    pub fn put_expecting(
+        &self,
+        caller: &Caller,
+        name: &str,
+        put: Put,
+        expect: Expect,
+    ) -> Result<()> {
         let action = if put.values.is_some() { "put" } else { "edit" };
-        let result = self.apply_put(name, put);
+        let result = self.apply_put(name, put, expect);
         self.record_result(caller, action, name, result)
     }
 

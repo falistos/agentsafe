@@ -337,6 +337,7 @@ impl From<anyhow::Error> for ApiError {
         match e.downcast_ref::<Refusal>() {
             Some(r @ Refusal::NotFound(_)) => ApiError(StatusCode::NOT_FOUND, r.to_string()),
             Some(r @ Refusal::Invalid(_)) => ApiError(StatusCode::BAD_REQUEST, r.to_string()),
+            Some(r @ Refusal::Conflict(_)) => ApiError(StatusCode::CONFLICT, r.to_string()),
             None => {
                 eprintln!("agentsafe: {e:#}");
                 ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))

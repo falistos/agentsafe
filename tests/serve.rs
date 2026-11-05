@@ -1085,9 +1085,13 @@ fn values_replaced_in_the_ui_reach_a_remote_run() {
         .into_iter()
         .filter(|l| l["via"] == "ui" && l["action"] == "put")
         .collect();
-    assert_eq!(puts.len(), 1, "{puts:?}");
+    assert_eq!(puts.len(), 2, "{puts:?}");
     assert_eq!(puts[0]["who"], "alice@example.com");
     assert_eq!(puts[0]["entry"], "app");
+    assert_eq!(puts[0]["result"], "ok");
+    // The refused replace is audited like any failed write.
+    assert_eq!(puts[1]["entry"], "nothing");
+    assert_eq!(puts[1]["result"], "error");
     let raw = fs::read_to_string(server.home.path("audit.jsonl")).unwrap();
     assert!(!raw.contains(fresh));
 }
@@ -1124,7 +1128,7 @@ fn new_entries_are_created_and_deleted_on_a_typed_confirmation() {
         "/new",
         &[("name", "cloud"), ("values", "TOKEN=other-value-1")],
     );
-    assert_eq!(again.status, 400);
+    assert_eq!(again.status, 409);
     assert!(again.body.contains("already exists"));
     assert_eq!(
         post(&proxy, "/new", &[("name", "bad name"), ("values", "A=1")]).status,
@@ -1321,4 +1325,161 @@ fn the_audit_page_is_for_admins_of_everything_and_lists_newest_first() {
     let page = get(&proxy, "/audit").body;
     assert_eq!(page.matches("<tr><td>").count(), 200);
     assert!(page.contains("bulk209") && !page.contains("first reason given"));
+}
+
+/// The value of a form field as the page renders it, input or textarea.
+fn field(body: &str, name: &str) -> String {
+    let at = body.find(&format!(r#"name="{name}""#)).unwrap();
+    let tag = &body[body[..at].rfind('<').unwrap()..];
+    if tag.starts_with("<textarea") {
+        let start = tag.find('>').unwrap() + 1;
+        tag[start..tag.find("</textarea>").unwrap()].to_string()
+    } else {
+        let start = tag.find(r#"value=""#).unwrap() + 7;
+        tag[start..][..tag[start..].find('"').unwrap()].to_string()
+    }
+}
+
+#[test]
+fn concurrent_creations_of_one_name_leave_exactly_one_winner() {
+    let server = Server::start(Home::local());
+    let proxy = admin_proxy(&server, r#""*""#);
+    // Hold the vault lock so every request is past its own checks before any write happens.
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(server.home.path("vault.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let statuses: Vec<u16> = thread::scope(|s| {
+        let racers: Vec<_> = (0..4)
+            .map(|i| {
+                let proxy = &proxy;
+                s.spawn(move || {
+                    let values = format!("TOKEN=racer-value-{i}-271828");
+                    post(proxy, "/new", &[("name", "raced"), ("values", &values)]).status
+                })
+            })
+            .collect();
+        thread::sleep(Duration::from_millis(500));
+        lock.unlock().unwrap();
+        racers.into_iter().map(|r| r.join().unwrap()).collect()
+    });
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 303).count(),
+        1,
+        "{statuses:?}"
+    );
+    assert!(
+        statuses.iter().all(|s| matches!(s, 303 | 409)),
+        "{statuses:?}"
+    );
+    let puts = server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["entry"] == "raced" && l["action"] == "put")
+        .collect::<Vec<_>>();
+    assert_eq!(puts.len(), 4, "{puts:?}");
+    assert_eq!(puts.iter().filter(|l| l["result"] == "ok").count(), 1);
+
+    // Replacing values never brings back an entry that is gone.
+    server.home.ok(&["rm", "raced"]);
+    let reply = post(
+        &proxy,
+        "/e/raced/values",
+        &[("values", "TOKEN=back-from-the-dead-1")],
+    );
+    assert_eq!(reply.status, 404);
+    assert!(!server.home.ok(&["list"]).contains("raced"));
+}
+
+#[test]
+fn saving_one_field_keeps_list_items_that_contain_a_comma() {
+    let server = Server::start(Home::local());
+    server.home.ok(&[
+        "edit",
+        "db",
+        "--tag",
+        "region, west",
+        "--tag",
+        "plain",
+        "--used-by",
+        "service, worker",
+    ]);
+    let proxy = admin_proxy(&server, r#""*""#);
+    let page = get(&proxy, "/e/db").body;
+    // A browser submits what it was given, with CRLF line breaks.
+    let crlf = |s: String| s.replace('\n', "\r\n");
+    let (tags, used_by) = (crlf(field(&page, "tags")), crlf(field(&page, "used_by")));
+    let reply = post(
+        &proxy,
+        "/e/db/meta",
+        &[
+            ("description", "only this changed"),
+            ("used_by", &used_by),
+            ("owner", &field(&page, "owner")),
+            ("rotate_by", &field(&page, "rotate_by")),
+            ("tags", &tags),
+        ],
+    );
+    assert_eq!(reply.status, 303, "{}", reply.body);
+    let (status, body) = api(&proxy, "GET", "/api/v1/entries/db", None, true);
+    assert_eq!(status, 200);
+    let entry: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        entry["tags"],
+        serde_json::json!(["region, west", "plain"]),
+        "{body}"
+    );
+    assert_eq!(
+        entry["used_by"],
+        serde_json::json!(["service, worker"]),
+        "{body}"
+    );
+    assert_eq!(entry["description"], "only this changed");
+
+    // Items are separated by lines; blank lines are dropped.
+    let reply = post(
+        &proxy,
+        "/e/db/meta",
+        &[("tags", "one\r\n\r\n  two  \r\n"), ("used_by", "")],
+    );
+    assert_eq!(reply.status, 303);
+    let (_, body) = api(&proxy, "GET", "/api/v1/entries/db", None, true);
+    let entry: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(entry["tags"], serde_json::json!(["one", "two"]), "{body}");
+    assert!(entry.get("used_by").is_none(), "{body}");
+}
+
+#[test]
+fn an_admin_of_a_prefix_keeps_the_ui_after_the_last_matching_entry_is_gone() {
+    let server = Server::start(Home::local());
+    let proxy = admin_proxy(&server, r#""db*""#);
+    let reply = post(&proxy, "/e/db/delete", &[("confirm", "db")]);
+    assert_eq!(reply.status, 303);
+    assert!(!server.home.ok(&["list"]).contains("db\t"));
+
+    let index = get(&proxy, "/");
+    assert_eq!(index.status, 200, "{}", index.body);
+    assert!(index.body.contains("No entries yet."));
+    assert!(!index.body.contains("/e/app"));
+    assert_eq!(get(&proxy, "/new").status, 200);
+    let created = post(
+        &proxy,
+        "/new",
+        &[("name", "db2"), ("values", "DB_URL=postgres-fixture-1")],
+    );
+    assert_eq!(created.status, 303, "{}", created.body);
+    assert_eq!(get(&proxy, "/").status, 200);
+    assert_eq!(get(&proxy, "/audit").status, 403);
+
+    // Without any admin grant the UI stays closed, entries or not.
+    proxy.peer(
+        Some(&caps(r#"{"entries": ["db*"], "actions": ["get", "put"]}"#)),
+        Some("bob@example.com"),
+    );
+    assert_eq!(get(&proxy, "/").status, 403);
+    assert_eq!(get(&proxy, "/new").status, 403);
 }
