@@ -12,15 +12,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
-use crate::mask::{MIN_LEN, Masker};
-
-#[derive(Deserialize)]
-struct Config {
-    identity: PathBuf,
-    /// Extra age recipients, e.g. an offline recovery key.
-    #[serde(default)]
-    recipients: Vec<String>,
-}
+use crate::mask::MIN_LEN;
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Meta {
@@ -52,16 +44,7 @@ pub struct Vault {
     pub entries: BTreeMap<String, Entry>,
 }
 
-impl Vault {
-    pub fn masker(&self) -> Masker {
-        Masker::new(self.entries.iter().flat_map(|(name, e)| {
-            e.values
-                .values()
-                .map(move |v| (name.as_str(), v.expose_secret()))
-        }))
-    }
-}
-
+/// An entry as the catalog shows it: metadata and key names, never values.
 #[derive(Serialize, Deserialize)]
 pub struct CatalogEntry {
     #[serde(flatten)]
@@ -82,27 +65,14 @@ pub struct Store {
 }
 
 impl Store {
-    /// Reads `$SAFE_CONFIG`, or `~/.config/safe/config.toml`; the vault and catalog live next to it.
-    pub fn open() -> Result<Store> {
-        let path = match std::env::var_os("SAFE_CONFIG") {
-            Some(p) => PathBuf::from(p),
-            None => home()?.join(".config/safe/config.toml"),
-        };
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("cannot read config {}", path.display()))?;
-        let config: Config =
-            toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
-        let dir = path.parent().unwrap_or(Path::new("."));
-        let identity = match config.identity.strip_prefix("~") {
-            Ok(rest) => home()?.join(rest),
-            Err(_) => config.identity,
-        };
-        Ok(Store {
+    /// The vault and the catalog live in `dir`, next to the config.
+    pub fn new(dir: &Path, identity: PathBuf, recipients: Vec<String>) -> Store {
+        Store {
             identity,
-            recipients: config.recipients,
+            recipients,
             vault: dir.join("vault.age"),
             catalog: dir.join("catalog.toml"),
-        })
+        }
     }
 
     pub fn catalog(&self) -> Result<Catalog> {
@@ -193,12 +163,6 @@ fn expose_values<S: Serializer>(
     s: S,
 ) -> Result<S::Ok, S::Error> {
     s.collect_map(values.iter().map(|(k, v)| (k, v.expose_secret())))
-}
-
-fn home() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is not set")
 }
 
 /// The temp file is created 0600 by `tempfile` and renamed over the target, so readers never see

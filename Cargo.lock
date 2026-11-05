@@ -89,6 +89,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentsafe"
+version = "0.1.0"
+dependencies = [
+ "age",
+ "aho-corasick",
+ "anyhow",
+ "base64 0.23.1",
+ "clap",
+ "hex",
+ "jiff",
+ "minijinja",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "toml 1.2.0+spec-1.1.0",
+ "zeroize",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1392,27 +1413,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "safe"
-version = "0.1.0"
-dependencies = [
- "age",
- "aho-corasick",
- "anyhow",
- "base64 0.23.1",
- "clap",
- "hex",
- "jiff",
- "minijinja",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "tempfile",
- "toml 1.2.0+spec-1.1.0",
- "zeroize",
-]
 
 [[package]]
 name = "salsa20"
