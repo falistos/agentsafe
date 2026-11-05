@@ -15,7 +15,9 @@ pub enum Outcome {
     Error,
 }
 
-/// One audited event. Never carries a value.
+/// One audited event: the outcome of a vault access (a fetch or a write), not of the whole
+/// command. Argument and input errors that never reach the vault are not logged, and a `run` whose
+/// key lookup or child fails after a successful fetch stays `ok`. Never carries a value.
 #[derive(Serialize)]
 pub struct Event {
     pub who: String,

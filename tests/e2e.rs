@@ -3,6 +3,8 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Barrier;
+use std::thread;
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE};
@@ -688,4 +690,89 @@ fn an_audit_write_failure_fails_the_command_and_releases_no_value() {
     assert!(!out.status.success());
     // Reads that are not audited keep working.
     assert!(home.agentsafe(&["list"]).status.success());
+}
+
+#[test]
+fn list_and_verify_import_do_not_depend_on_the_catalog_export() {
+    let home = Home::new();
+    home.import_fixtures();
+    fs::remove_file(home.path("catalog.toml")).unwrap();
+
+    let out = home.agentsafe(&["verify-import", fixtures().to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stdout));
+    assert_eq!(text(&out.stdout), "app.env\tapp\tOK\ndb.env\tdb\tOK\n");
+    let list = text(&home.agentsafe(&["list"]).stdout);
+    assert!(
+        list.contains("app\t4\t") && list.contains("db\t3\t"),
+        "{list}"
+    );
+    assert!(text(&home.agentsafe(&["describe", "app"]).stdout).contains("keys: API_TOKEN"));
+    // The export is rewritten by the next save, and a stale one is never read.
+    fs::write(home.path("catalog.toml"), "").unwrap();
+    assert!(text(&home.agentsafe(&["list"]).stdout).contains("app\t4\t"));
+}
+
+#[test]
+fn concurrent_rm_and_edit_leave_the_entry_deleted() {
+    let home = Home::new();
+    for round in 0..4 {
+        let victim = format!("victim{round}");
+        let out = home.agentsafe_stdin(
+            &["set", &victim, "--key", "TOKEN"],
+            "fixture-victim-12345\n",
+        );
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let barrier = Barrier::new(8);
+        thread::scope(|s| {
+            s.spawn(|| {
+                barrier.wait();
+                // Succeeds, or finds the entry already edited and then removed: either order.
+                home.agentsafe(&["rm", &victim]);
+            });
+            for i in 0..7 {
+                let (barrier, victim) = (&barrier, &victim);
+                let home = &home;
+                s.spawn(move || {
+                    barrier.wait();
+                    home.agentsafe(&["edit", victim, "--description", &format!("edit {i}")]);
+                });
+            }
+        });
+        let list = text(&home.agentsafe(&["list"]).stdout);
+        assert!(
+            !list.contains(&victim),
+            "round {round}: {victim} came back:\n{list}"
+        );
+    }
+}
+
+#[test]
+fn concurrent_sets_lose_no_entry() {
+    let home = Home::new();
+    for round in 0..3 {
+        let barrier = Barrier::new(8);
+        thread::scope(|s| {
+            for i in 0..8 {
+                let (barrier, home) = (&barrier, &home);
+                s.spawn(move || {
+                    barrier.wait();
+                    let name = format!("entry{round}x{i}");
+                    let out = home.agentsafe_stdin(
+                        &["set", &name, "--key", "TOKEN"],
+                        &format!("fixture-parallel-{i}-12345\n"),
+                    );
+                    assert!(out.status.success(), "{}", text(&out.stderr));
+                });
+            }
+        });
+        let list = text(&home.agentsafe(&["list"]).stdout);
+        for i in 0..8 {
+            let name = format!("entry{round}x{i}\t");
+            assert!(
+                list.contains(&name),
+                "round {round}: {name:?} lost:\n{list}"
+            );
+        }
+    }
+    assert_eq!(mode(&home.path("vault.lock")), 0o600);
 }

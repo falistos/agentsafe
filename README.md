@@ -17,9 +17,13 @@ file. The config holds exactly one of `identity = "<age identity file>"` (local)
 lists extra recipients the vault is also encrypted to, e.g. an offline recovery key.
 
 `$AGENTSAFE_CONFIG` overrides the config path. `vault.age` (values and metadata, encrypted) and
-`catalog.toml` (metadata and key names, plaintext, regenerated on every write) sit next to the
-config. Both are written atomically with mode 0600. `audit.jsonl` (0600, one JSON line per event:
-`ts`, `who`, `via`, `action`, `entry`, `result`, never a value) sits there too.
+`catalog.toml` (metadata and key names, plaintext, an export regenerated on every write and never
+read back) sit next to the config. Both are written atomically with mode 0600; writes hold an
+exclusive lock on `vault.lock`, so concurrent `set`, `edit` and `rm` do not lose each other's
+changes. `audit.jsonl` (0600, one JSON line per event: `ts`, `who`, `via`, `action`, `entry`,
+`result`, never a value) sits there too. A line records the outcome of the vault access (fetch or
+write), not of the whole command: argument and input errors that never reach the vault are not
+logged, and a `run` whose key lookup or child fails after a successful fetch stays `ok`.
 
 ## Commands
 

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -62,26 +63,24 @@ pub struct Store {
     recipients: Vec<String>,
     vault: PathBuf,
     catalog: PathBuf,
+    lock: PathBuf,
 }
 
 impl Store {
-    /// The vault and the catalog live in `dir`, next to the config.
+    /// The vault, its lock and the catalog export live in `dir`, next to the config.
     pub fn new(dir: &Path, identity: PathBuf, recipients: Vec<String>) -> Store {
         Store {
             identity,
             recipients,
             vault: dir.join("vault.age"),
             catalog: dir.join("catalog.toml"),
+            lock: dir.join("vault.lock"),
         }
     }
 
+    /// Derived from the decrypted vault; `catalog.toml` is an export and is never read back.
     pub fn catalog(&self) -> Result<Catalog> {
-        match fs::read_to_string(&self.catalog) {
-            Ok(text) => toml::from_str(&text)
-                .with_context(|| format!("invalid catalog {}", self.catalog.display())),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Catalog::new()),
-            Err(e) => Err(e).with_context(|| format!("cannot read {}", self.catalog.display())),
-        }
+        Ok(catalog_of(&self.load()?))
     }
 
     pub fn load(&self) -> Result<Vault> {
@@ -105,7 +104,26 @@ impl Store {
             .ok_or_else(|| anyhow!("{} decrypts but does not parse", self.vault.display()))
     }
 
-    pub fn save(&self, vault: &Vault) -> Result<()> {
+    /// Load, change and save the vault under an exclusive lock on `vault.lock`, held until the
+    /// vault and the catalog are written. Nothing is saved if `change` fails. The lock is per open
+    /// file, so it also serialises threads of one process; readers take none, the save is atomic.
+    pub fn update<T>(&self, change: impl FnOnce(&mut Vault) -> Result<T>) -> Result<T> {
+        let lock = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&self.lock)
+            .with_context(|| format!("cannot open {}", self.lock.display()))?;
+        lock.lock()
+            .with_context(|| format!("cannot lock {}", self.lock.display()))?;
+        let mut vault = self.load()?;
+        let result = change(&mut vault)?;
+        self.save(&vault)?;
+        Ok(result)
+    }
+
+    fn save(&self, vault: &Vault) -> Result<()> {
         let mut recipients = self.identity_file()?.to_recipients()?;
         for r in &self.recipients {
             let r = age::x25519::Recipient::from_str(r)
@@ -121,30 +139,36 @@ impl Store {
         writer.finish()?;
         write_atomic(&self.vault, &encrypted)?;
 
-        let catalog: Catalog = vault
-            .entries
-            .iter()
-            .map(|(name, e)| {
-                let entry = CatalogEntry {
-                    meta: e.meta.clone(),
-                    keys: e.values.keys().cloned().collect(),
-                    unmasked: e
-                        .values
-                        .iter()
-                        .filter(|(_, v)| v.expose_secret().len() < MIN_LEN)
-                        .map(|(k, _)| k.clone())
-                        .collect(),
-                };
-                (name.clone(), entry)
-            })
-            .collect();
-        write_atomic(&self.catalog, toml::to_string(&catalog)?.as_bytes())
+        write_atomic(
+            &self.catalog,
+            toml::to_string(&catalog_of(vault))?.as_bytes(),
+        )
     }
 
     fn identity_file(&self) -> Result<IdentityFile<age::NoCallbacks>> {
         IdentityFile::from_file(self.identity.to_string_lossy().into_owned())
             .with_context(|| format!("cannot read identity {}", self.identity.display()))
     }
+}
+
+fn catalog_of(vault: &Vault) -> Catalog {
+    vault
+        .entries
+        .iter()
+        .map(|(name, e)| {
+            let entry = CatalogEntry {
+                meta: e.meta.clone(),
+                keys: e.values.keys().cloned().collect(),
+                unmasked: e
+                    .values
+                    .iter()
+                    .filter(|(_, v)| v.expose_secret().len() < MIN_LEN)
+                    .map(|(k, _)| k.clone())
+                    .collect(),
+            };
+            (name.clone(), entry)
+        })
+        .collect()
 }
 
 pub fn validate_name(name: &str) -> Result<()> {

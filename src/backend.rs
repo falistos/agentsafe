@@ -168,20 +168,21 @@ impl LocalBackend {
 
     fn apply_put(&self, name: &str, put: Put) -> Result<()> {
         validate_name(name)?;
-        let mut vault = self.store.load()?;
-        let entry = match (&put.values, vault.entries.contains_key(name)) {
-            (None, false) => bail!("no entry named {name}"),
-            (Some(values), _) if values.is_empty() => bail!("no KEY=VALUE pairs given"),
-            _ => vault
-                .entries
-                .entry(name.to_string())
-                .or_insert_with(Entry::default),
-        };
-        put.meta.apply(&mut entry.meta)?;
-        if let Some(values) = put.values {
-            entry.values = values;
-        }
-        self.store.save(&vault)
+        self.store.update(|vault| {
+            let entry = match (&put.values, vault.entries.contains_key(name)) {
+                (None, false) => bail!("no entry named {name}"),
+                (Some(values), _) if values.is_empty() => bail!("no KEY=VALUE pairs given"),
+                _ => vault
+                    .entries
+                    .entry(name.to_string())
+                    .or_insert_with(Entry::default),
+            };
+            put.meta.apply(&mut entry.meta)?;
+            if let Some(values) = put.values {
+                entry.values = values;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -255,13 +256,12 @@ impl Backend for LocalBackend {
     }
 
     fn remove(&self, name: &str) -> Result<()> {
-        let result = (|| {
-            let mut vault = self.store.load()?;
+        let result = self.store.update(|vault| {
             if vault.entries.remove(name).is_none() {
                 bail!("no entry named {name}");
             }
-            self.store.save(&vault)
-        })();
+            Ok(())
+        });
         self.record_result("rm", name, result)
     }
 }
