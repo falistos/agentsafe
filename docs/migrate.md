@@ -73,7 +73,11 @@ one `-> X25519` line per recipient: `grep -a -c '^-> X25519' vault.age`.
 | `set -a; . ~/.secrets/ovh-api.env; set +a; ./deploy` | `agentsafe run --env ovh-api -- ./deploy` |
 | `curl -H "Authorization: Bearer $(cat ~/.secrets/x.token)" …` | `agentsafe run --env x -- sh -c 'curl -H "Authorization: Bearer $X_TOKEN" …'` |
 | `cat > ~/.secrets/x.token` | `… \| agentsafe set x --key X_TOKEN` |
-| a config file with the value in it | a template and `agentsafe render TEMPLATE --allow x -o FILE` |
+| a config file with the value in it | `X_TOKEN={{ secrets["x"].X_TOKEN }}` in a template, then `agentsafe render TEMPLATE --allow x -o FILE` |
+| rotate: call the API, write the new token | `agentsafe run --env x -- sh -c 'curl -sf -X POST -H "Authorization: Bearer $X_TOKEN" …/rotate \| jq -er .token \| agentsafe set x --key X_TOKEN'` |
+
+`run` masks every value of the entry, a non-secret one such as an account id too: keep what
+agents must read in the description. A template line without `{{ }}` is copied as is.
 
 Use `sh -c`, not your login shell. A shell that reads startup files for every invocation (zsh
 reads `~/.zshenv`) can reset the variables `run` injected.
