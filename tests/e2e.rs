@@ -352,17 +352,15 @@ fn init_twice_refuses_and_leaves_the_files_unchanged() {
 }
 
 #[test]
-fn init_server_writes_a_remote_config_and_every_command_then_fails() {
+fn init_server_writes_a_remote_config_that_every_command_uses() {
     let tmp = tempfile::tempdir().unwrap();
     let config = tmp.path().join("config.toml");
-    let out = cli(
-        &config,
-        &["init", "--server", "http://agentsafe.example:8443"],
-    );
+    // Port 1 on loopback refuses at once: each command fails reaching the server.
+    let out = cli(&config, &["init", "--server", "http://127.0.0.1:1"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
         fs::read_to_string(&config).unwrap(),
-        "server = \"http://agentsafe.example:8443\"\n"
+        "server = \"http://127.0.0.1:1\"\n"
     );
     assert!(!tmp.path().join("identity.txt").exists());
 
@@ -377,7 +375,7 @@ fn init_server_writes_a_remote_config_and_every_command_then_fails() {
         let out = cli(&config, args);
         assert!(!out.status.success(), "{args:?}");
         assert!(
-            text(&out.stderr).contains("remote mode is not available yet"),
+            text(&out.stderr).contains("cannot reach http://127.0.0.1:1"),
             "{args:?}: {}",
             text(&out.stderr)
         );

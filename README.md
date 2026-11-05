@@ -13,8 +13,11 @@ agentsafe init
 `init` creates `~/.config/agentsafe/` (0700), a new age identity (`identity.txt`, 0600) and
 `config.toml` pointing at it, and prints the paths and the public key. It never overwrites either
 file. The config holds exactly one of `identity = "<age identity file>"` (local) or
-`server = "<URL>"` (remote, `agentsafe init --server URL`; not available yet). `recipients = []`
-lists extra recipients the vault is also encrypted to, e.g. an offline recovery key.
+`server = "<URL>"` (remote, `agentsafe init --server URL`): a remote config sends every command
+except `init` and `serve` to an `agentsafe serve` at that URL (`https://host.tailnet.ts.net` or
+`http://...`), which checks the caller's grants; values are injected and masked on the client.
+`recipients = []` lists extra recipients the vault is also encrypted to, e.g. an offline recovery
+key. A `[serve]` table sets `socket = "<path>"` for `agentsafe serve`.
 
 `$AGENTSAFE_CONFIG` overrides the config path. `vault.age` (values and metadata, encrypted) and
 `catalog.toml` (metadata and key names, plaintext, an export regenerated on every write and never
@@ -39,6 +42,7 @@ logged, and a `run` whose key lookup or child fails after a successful fetch sta
 | `agentsafe run --env NAME[:KEY[=VAR]] … -- CMD ARGS` | Runs `CMD` with the values in its environment, stdout and stderr masked. |
 | `agentsafe render TEMPLATE --allow NAME … > FILE` | Renders a minijinja template; `secrets["NAME"].KEY` reads allowed entries only. Refuses a terminal or pipe as stdout and makes the file 0600. |
 | `agentsafe scrub` | Copies stdin to stdout with every known value masked. |
+| `agentsafe serve [--socket PATH]` | Serves the local vault's API on a Unix socket (0600) for `tailscale serve --accept-app-caps=github.com/falistos/agentsafe/cap/agentsafe unix:PATH`. Socket: `--socket`, `[serve].socket`, `$XDG_RUNTIME_DIR/agentsafe.sock`, or `agentsafe.sock` next to the config. A second `serve` on the same socket is refused while the first holds `<socket>.lock`; on SIGTERM or SIGINT, open requests get 5 s before they are cut. Each request needs grants of that capability, `{"entries": ["NAME", "PREFIX*", "*"], "actions": ["list", "get", "put", "admin"]}` (`get` and `put` imply `list`, `admin` implies all and `rm`), and is audited with `via: "api"`. |
 | `agentsafe verify-import DIR` | For each file of `DIR`, compares the SHA-256 fingerprint of its parsed `KEY=VALUE` set with the entry imported from it. Prints names and `OK`, `MISMATCH` or `NOT IMPORTED`; exits 1 unless all are `OK`. |
 
 `set`, `import` and `edit` take `--description`, `--owner`, `--rotate-by YYYY-MM-DD`, and repeatable

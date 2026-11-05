@@ -15,11 +15,12 @@ struct RawConfig {
     serve: Serve,
 }
 
-/// Settings of `agentsafe serve`, parsed now and read by the server.
+/// Settings of `agentsafe serve`.
 #[derive(Deserialize, Default)]
-#[allow(dead_code)]
 pub struct Serve {
     pub socket: Option<String>,
+    /// Parsed now, read once the server notifies.
+    #[allow(dead_code)]
     pub ntfy: Option<String>,
 }
 
@@ -36,7 +37,6 @@ pub enum Mode {
 pub struct Config {
     pub path: PathBuf,
     pub mode: Mode,
-    #[allow(dead_code)]
     pub serve: Serve,
 }
 

@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use jiff::civil::Date;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,8 @@ pub enum Purpose {
     Render,
     Scrub,
     VerifyImport,
+    /// A fetch through the server's API.
+    Get,
 }
 
 impl Purpose {
@@ -32,6 +35,7 @@ impl Purpose {
             Purpose::Render => "render",
             Purpose::Scrub => "scrub",
             Purpose::VerifyImport => "verify-import",
+            Purpose::Get => "get",
         }
     }
 }
@@ -41,9 +45,28 @@ pub enum Selection {
     Names(Vec<String>),
 }
 
+/// An error the caller can fix, which the server answers with 404 or 400.
+#[derive(Debug)]
+pub enum Refusal {
+    NotFound(String),
+    Invalid(String),
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Refusal::NotFound(name) => write!(f, "no entry named {name}"),
+            Refusal::Invalid(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
+
 /// A metadata change: an absent field is left alone, an empty one clears it.
 /// `rotate_by` is `YYYY-MM-DD`, or empty to clear.
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MetaPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -70,11 +93,10 @@ impl MetaPatch {
         let rotate_by = match self.rotate_by {
             None => None,
             Some(d) if d.is_empty() => Some(None),
-            Some(d) => {
-                Some(Some(Date::from_str(&d).map_err(|_| {
-                    anyhow!("invalid rotate-by {d:?}: use YYYY-MM-DD")
-                })?))
-            }
+            // The rejected text is not quoted: it reaches API answers and the audit log.
+            Some(d) => Some(Some(Date::from_str(&d).map_err(|_| {
+                Refusal::Invalid("invalid rotate-by: use YYYY-MM-DD".into())
+            })?)),
         };
         if let Some(v) = self.description {
             meta.description = text(v);
@@ -114,6 +136,15 @@ pub trait Backend {
     fn remove(&self, name: &str) -> Result<()>;
 }
 
+/// Serializes values in clear, for the API's request and response bodies only.
+pub struct Exposed<'a>(pub &'a Values);
+
+impl Serialize for Exposed<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(self.0.iter().map(|(k, v)| (k, v.expose_secret())))
+    }
+}
+
 /// A masker for everything that was fetched, entry by entry.
 pub fn masker(fetched: &Fetched) -> Masker {
     Masker::new(fetched.iter().flat_map(|(name, values)| {
@@ -123,10 +154,19 @@ pub fn masker(fetched: &Fetched) -> Masker {
     }))
 }
 
+/// Who the audit log names for an operation, and through what.
+#[derive(Clone)]
+pub struct Caller {
+    pub who: String,
+    pub via: &'static str,
+}
+
+/// The age vault on this machine. The `Backend` impl acts as the local user; the server calls
+/// the `*_as` methods with the identity of each request.
 pub struct LocalBackend {
     store: Store,
     audit: AuditLog,
-    who: String,
+    user: Caller,
 }
 
 impl LocalBackend {
@@ -135,20 +175,41 @@ impl LocalBackend {
         LocalBackend {
             store,
             audit: AuditLog::new(dir.join("audit.jsonl")),
-            who: format!("local:{user}"),
+            user: Caller {
+                who: format!("local:{user}"),
+                via: "local",
+            },
         }
+    }
+
+    /// Records a request refused before it reached the vault.
+    pub fn record_denied(
+        &self,
+        caller: &Caller,
+        action: &str,
+        entry: Option<&str>,
+        reason: &str,
+    ) -> Result<()> {
+        self.record(
+            caller,
+            action,
+            entry,
+            Outcome::Denied,
+            Some(reason.to_string()),
+        )
     }
 
     fn record(
         &self,
+        caller: &Caller,
         action: &str,
         entry: Option<&str>,
         outcome: Outcome,
         reason: Option<String>,
     ) -> Result<()> {
         self.audit.append(&Event {
-            who: self.who.clone(),
-            via: "local".into(),
+            who: caller.who.clone(),
+            via: caller.via.into(),
             action: action.into(),
             entry: entry.map(str::to_string),
             result: outcome,
@@ -158,20 +219,34 @@ impl LocalBackend {
     }
 
     /// Audits the outcome of an operation on one entry; an audit failure wins over the result.
-    fn record_result<T>(&self, action: &str, entry: &str, result: Result<T>) -> Result<T> {
+    fn record_result<T>(
+        &self,
+        caller: &Caller,
+        action: &str,
+        entry: &str,
+        result: Result<T>,
+    ) -> Result<T> {
         match &result {
-            Ok(_) => self.record(action, Some(entry), Outcome::Ok, None)?,
-            Err(e) => self.record(action, Some(entry), Outcome::Error, Some(format!("{e:#}")))?,
+            Ok(_) => self.record(caller, action, Some(entry), Outcome::Ok, None)?,
+            Err(e) => self.record(
+                caller,
+                action,
+                Some(entry),
+                Outcome::Error,
+                Some(format!("{e:#}")),
+            )?,
         }
         result
     }
 
     fn apply_put(&self, name: &str, put: Put) -> Result<()> {
-        validate_name(name)?;
+        validate_name(name).map_err(|e| Refusal::Invalid(e.to_string()))?;
         self.store.update(|vault| {
             let entry = match (&put.values, vault.entries.contains_key(name)) {
-                (None, false) => bail!("no entry named {name}"),
-                (Some(values), _) if values.is_empty() => bail!("no KEY=VALUE pairs given"),
+                (None, false) => return Err(Refusal::NotFound(name.into()).into()),
+                (Some(values), _) if values.is_empty() => {
+                    return Err(Refusal::Invalid("no KEY=VALUE pairs given".into()).into());
+                }
                 _ => vault
                     .entries
                     .entry(name.to_string())
@@ -184,21 +259,20 @@ impl LocalBackend {
             Ok(())
         })
     }
-}
 
-impl Backend for LocalBackend {
-    fn catalog(&self) -> Result<Catalog> {
-        self.store.catalog()
-    }
-
-    fn fetch(&self, purpose: Purpose, selection: &Selection) -> Result<Fetched> {
+    pub fn fetch_as(
+        &self,
+        caller: &Caller,
+        purpose: Purpose,
+        selection: &Selection,
+    ) -> Result<Fetched> {
         let action = purpose.action();
         let requested: Option<BTreeSet<&str>> = match selection {
             Selection::All => None,
             Selection::Names(names) => Some(names.iter().map(String::as_str).collect()),
         };
         // Entry-less actions are one line however many entries were read.
-        let per_entry = matches!(purpose, Purpose::Run | Purpose::Render);
+        let per_entry = matches!(purpose, Purpose::Run | Purpose::Render | Purpose::Get);
 
         let vault = match self.store.load() {
             Ok(vault) => vault,
@@ -206,7 +280,13 @@ impl Backend for LocalBackend {
                 let reason = format!("{e:#}");
                 if let (Some(names), true) = (&requested, per_entry) {
                     for name in names {
-                        self.record(action, Some(name), Outcome::Error, Some(reason.clone()))?;
+                        self.record(
+                            caller,
+                            action,
+                            Some(name),
+                            Outcome::Error,
+                            Some(reason.clone()),
+                        )?;
                     }
                 }
                 return Err(e);
@@ -223,13 +303,14 @@ impl Backend for LocalBackend {
                 if !missing.is_empty() {
                     for name in &missing {
                         self.record(
+                            caller,
                             action,
                             Some(name),
                             Outcome::Error,
                             Some(format!("no entry named {name}")),
                         )?;
                     }
-                    bail!("no entry named {}", missing[0]);
+                    return Err(Refusal::NotFound(missing[0].into()).into());
                 }
                 names.iter().map(|n| n.to_string()).collect()
             }
@@ -237,10 +318,10 @@ impl Backend for LocalBackend {
         // Logged before the values leave the backend: if the audit write fails, none are released.
         if per_entry {
             for name in &names {
-                self.record(action, Some(name), Outcome::Ok, None)?;
+                self.record(caller, action, Some(name), Outcome::Ok, None)?;
             }
         } else {
-            self.record(action, None, Outcome::Ok, None)?;
+            self.record(caller, action, None, Outcome::Ok, None)?;
         }
         let mut vault = vault;
         Ok(names
@@ -249,20 +330,38 @@ impl Backend for LocalBackend {
             .collect())
     }
 
-    fn put(&self, name: &str, put: Put) -> Result<()> {
+    pub fn put_as(&self, caller: &Caller, name: &str, put: Put) -> Result<()> {
         let action = if put.values.is_some() { "put" } else { "edit" };
         let result = self.apply_put(name, put);
-        self.record_result(action, name, result)
+        self.record_result(caller, action, name, result)
     }
 
-    fn remove(&self, name: &str) -> Result<()> {
+    pub fn remove_as(&self, caller: &Caller, name: &str) -> Result<()> {
         let result = self.store.update(|vault| {
             if vault.entries.remove(name).is_none() {
-                bail!("no entry named {name}");
+                return Err(Refusal::NotFound(name.into()).into());
             }
             Ok(())
         });
-        self.record_result("rm", name, result)
+        self.record_result(caller, "rm", name, result)
+    }
+}
+
+impl Backend for LocalBackend {
+    fn catalog(&self) -> Result<Catalog> {
+        self.store.catalog()
+    }
+
+    fn fetch(&self, purpose: Purpose, selection: &Selection) -> Result<Fetched> {
+        self.fetch_as(&self.user, purpose, selection)
+    }
+
+    fn put(&self, name: &str, put: Put) -> Result<()> {
+        self.put_as(&self.user, name, put)
+    }
+
+    fn remove(&self, name: &str) -> Result<()> {
+        self.remove_as(&self.user, name)
     }
 }
 

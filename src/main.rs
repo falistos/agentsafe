@@ -1,9 +1,12 @@
 mod audit;
 mod backend;
+mod client;
 mod config;
 mod dotenv;
 mod init;
 mod mask;
+mod policy;
+mod server;
 mod vault;
 
 use std::collections::BTreeMap;
@@ -28,6 +31,7 @@ use zeroize::Zeroizing;
 use crate::backend::{
     Backend, LocalBackend, MetaPatch, Purpose, Put, Selection, Values, masker, short_keys,
 };
+use crate::client::RemoteBackend;
 use crate::config::{Config, Mode};
 use crate::mask::{MIN_LEN, Masker};
 use crate::vault::Store;
@@ -99,6 +103,13 @@ enum Cmd {
     Scrub,
     /// Compare each file of a directory with the entry imported from it, by fingerprint.
     VerifyImport { dir: PathBuf },
+    /// Serve the local vault over HTTP on a Unix socket, for `tailscale serve`.
+    Serve {
+        /// Socket path; default `[serve].socket`, `$XDG_RUNTIME_DIR/agentsafe.sock`, or
+        /// `agentsafe.sock` next to the config.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
 }
 
 /// An empty value clears the field.
@@ -184,20 +195,24 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     let config = Config::load()?;
+    if let Cmd::Serve { socket } = cmd {
+        server::serve(config, socket)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let dir = config.dir().to_path_buf();
-    let backend = match config.mode {
+    let backend: Box<dyn Backend> = match config.mode {
         Mode::Local {
             identity,
             recipients,
-        } => LocalBackend::new(Store::new(&dir, identity, recipients), &dir),
-        Mode::Remote { ref server } => bail!(
-            "remote mode is not available yet (server = {server:?} in {})",
-            config.path.display()
-        ),
+        } => Box::new(LocalBackend::new(
+            Store::new(&dir, identity, recipients),
+            &dir,
+        )),
+        Mode::Remote { server } => Box::new(RemoteBackend::new(&server)),
     };
-    let backend: &dyn Backend = &backend;
+    let backend = backend.as_ref();
     match cmd {
-        Cmd::Init { .. } => unreachable!("handled above"),
+        Cmd::Init { .. } | Cmd::Serve { .. } => unreachable!("handled above"),
         Cmd::List => list(backend)?,
         Cmd::Describe { name } => describe(backend, &name)?,
         Cmd::Set { name, key, meta } => {

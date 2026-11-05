@@ -8,7 +8,6 @@ use serde::Serialize;
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
-#[allow(dead_code)]
 pub enum Outcome {
     Ok,
     Denied,
