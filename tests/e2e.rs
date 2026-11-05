@@ -3,18 +3,23 @@
     reason = "a fixture or setup step that fails must panic the test, as unwrap does"
 )]
 
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::Barrier;
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE};
+use rustix::process::{ioctl_tiocsctty, setsid};
+use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -892,6 +897,209 @@ fn wait_at_most(child: &mut Child, limit: Duration) -> Option<std::process::Exit
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Kills a process left behind by a failing test.
+struct KillOnDrop(String);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = Command::new("kill").args(["-KILL", &self.0]).output();
+    }
+}
+
+fn signal(signal: &str, pid: &str) {
+    let out = Command::new("kill")
+        .args([&format!("-{signal}"), pid])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "kill -{signal} {pid}");
+}
+
+fn is_alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+/// The content of `path` once `until` accepts it; a bounded wait, since the machine may be loaded.
+fn wait_for_file(path: &Path, until: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(content) = fs::read_to_string(path)
+            && until(&content)
+        {
+            return content;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never got there",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `agentsafe run --env app -- sh -c SCRIPT`, with the script's pid and marker files in `dir`.
+fn spawn_run(home: &Home, dir: &Path, script: &str) -> Child {
+    home.cmd(&["run", "--env", "app", "--", "sh", "-c", script])
+        .env("PIDFILE", dir.join("pid"))
+        .env("MARKER", dir.join("marker"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn sigterm_to_run_ends_the_child_and_exits_128_plus_the_signal() {
+    let home = Home::new();
+    home.import_fixtures();
+    let dir = tempfile::tempdir().unwrap();
+    let mut run = spawn_run(&home, dir.path(), "echo $$ > \"$PIDFILE\"; exec sleep 41");
+    let pid = wait_for_file(&dir.path().join("pid"), |c| c.ends_with('\n'))
+        .trim()
+        .to_string();
+    let _cleanup = KillOnDrop(pid.clone());
+
+    signal("TERM", &run.id().to_string());
+    let status = wait_at_most(&mut run, Duration::from_secs(10)).expect("run exits");
+    assert_eq!(status.code(), Some(128 + 15));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while is_alive(&pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!is_alive(&pid), "the child outlived agentsafe");
+}
+
+#[test]
+fn a_child_that_handles_the_signal_has_its_output_masked_and_its_exit_code_kept() {
+    let home = Home::new();
+    home.import_fixtures();
+    let dir = tempfile::tempdir().unwrap();
+    let script = "trap 'echo \"caught $API_TOKEN\"; exit 3' TERM; echo $$ > \"$PIDFILE\"; \
+                  while :; do sleep 0.05; done";
+    let mut run = spawn_run(&home, dir.path(), script);
+    let pid = wait_for_file(&dir.path().join("pid"), |c| c.ends_with('\n'))
+        .trim()
+        .to_string();
+    let _cleanup = KillOnDrop(pid);
+
+    signal("TERM", &run.id().to_string());
+    let out = {
+        let mut stdout = String::new();
+        run.stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        stdout
+    };
+    let status = wait_at_most(&mut run, Duration::from_secs(10)).expect("run exits");
+    assert_eq!(status.code(), Some(3));
+    assert_eq!(out, "caught ***app***\n");
+}
+
+#[test]
+fn run_keeps_waiting_for_a_child_that_survives_the_signal() {
+    let home = Home::new();
+    home.import_fixtures();
+    let dir = tempfile::tempdir().unwrap();
+    let script = "trap 'echo got >> \"$MARKER\"' HUP; echo $$ > \"$PIDFILE\"; \
+                  while :; do sleep 0.05; done";
+    let mut run = spawn_run(&home, dir.path(), script);
+    let pid = wait_for_file(&dir.path().join("pid"), |c| c.ends_with('\n'))
+        .trim()
+        .to_string();
+    let _cleanup = KillOnDrop(pid.clone());
+
+    signal("HUP", &run.id().to_string());
+    assert_eq!(
+        wait_for_file(&dir.path().join("marker"), |c| c == "got\n"),
+        "got\n"
+    );
+    assert!(run.try_wait().unwrap().is_none(), "run left with its child");
+
+    signal("KILL", &pid);
+    let status = wait_at_most(&mut run, Duration::from_secs(10)).expect("run exits");
+    assert_eq!(status.code(), Some(128 + 9));
+}
+
+#[test]
+fn ctrl_c_in_a_terminal_reaches_the_child_once() {
+    let home = Home::new();
+    home.import_fixtures();
+    let dir = tempfile::tempdir().unwrap();
+
+    // A terminal of our own: `run` leads a session whose controlling terminal is the pty, so
+    // that ^C written to the master signals its whole foreground group, as a keyboard does.
+    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+    grantpt(&master).unwrap();
+    unlockpt(&master).unwrap();
+    let name = ptsname(&master, Vec::new()).unwrap();
+    let slave = File::options()
+        .read(true)
+        .write(true)
+        .open(OsStr::from_bytes(name.to_bytes()))
+        .unwrap();
+    let script = "trap 'echo INT >> \"$MARKER\"' INT; echo $$ > \"$PIDFILE\"; echo ready; \
+                  while :; do sleep 0.05 & wait $!; done";
+    let mut cmd = home.cmd(&["run", "--env", "app", "--", "sh", "-c", script]);
+    cmd.env("PIDFILE", dir.path().join("pid"))
+        .env("MARKER", dir.path().join("marker"))
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave);
+    // SAFETY: the closure only makes system calls, between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            setsid()?;
+            ioctl_tiocsctty(io::stdin())?;
+            Ok(())
+        });
+    }
+    let mut run = cmd.spawn().unwrap();
+    let screen = Arc::new(Mutex::new(String::new()));
+    let reader = {
+        let screen = Arc::clone(&screen);
+        let mut master = File::from(master.try_clone().unwrap());
+        thread::spawn(move || {
+            let mut buf = [0; 256];
+            while let Ok(n @ 1..) = master.read(&mut buf) {
+                screen
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+        })
+    };
+    let pid = wait_for_file(&dir.path().join("pid"), |c| c.ends_with('\n'))
+        .trim()
+        .to_string();
+    let _cleanup = KillOnDrop(pid.clone());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !screen.lock().unwrap().contains("ready") {
+        assert!(Instant::now() < deadline, "the child never said ready");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    File::from(master).write_all(b"\x03").unwrap();
+    wait_for_file(&dir.path().join("marker"), |c| c == "INT\n");
+    // A second delivery would follow the first at once; a second of grace is plenty.
+    thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("marker")).unwrap(),
+        "INT\n"
+    );
+
+    signal("KILL", &pid);
+    let status = wait_at_most(&mut run, Duration::from_secs(10)).expect("run exits");
+    assert_eq!(status.code(), Some(128 + 9));
+    drop(reader);
 }
 
 #[test]
