@@ -1,7 +1,8 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::io::{self, ErrorKind, Read, Write};
 
-use aho_corasick::{AhoCorasick, MatchKind};
+use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 
@@ -37,11 +38,14 @@ impl Masker {
         }
         let mut by_first_byte = vec![Vec::new(); 256];
         for (i, p) in patterns.iter().enumerate() {
-            by_first_byte[p[0] as usize].push(i);
+            by_first_byte[usize::from(p[0])].push(i);
         }
         let ac = (!patterns.is_empty()).then(|| {
+            // Not the DFA that the default picks for few patterns: its build follows failure
+            // links per byte class and is quadratic on long periodic values.
             AhoCorasick::builder()
                 .match_kind(MatchKind::LeftmostLongest)
+                .kind(Some(AhoCorasickKind::ContiguousNFA))
                 .build(&patterns)
                 .expect("patterns are small enough for aho-corasick")
         });
@@ -92,7 +96,7 @@ impl Masker {
         (from..buf.len())
             .find(|&i| {
                 let tail = &buf[i..];
-                self.by_first_byte[tail[0] as usize].iter().any(|&p| {
+                self.by_first_byte[usize::from(tail[0])].iter().any(|&p| {
                     let p = &self.patterns[p];
                     p.len() > tail.len() && p.starts_with(tail)
                 })
@@ -108,15 +112,18 @@ pub struct Stream<'a> {
 
 impl Stream<'_> {
     pub fn push(&mut self, chunk: &[u8], out: &mut Vec<u8>) {
-        self.process(chunk, false, out);
+        self.held.extend_from_slice(chunk);
+        let hold = self.masker.hold_point(&self.held);
+        self.process(hold, out);
     }
 
     pub fn finish(&mut self, out: &mut Vec<u8>) {
-        self.process(&[], true, out);
+        self.process(self.held.len(), out);
     }
 
-    fn process(&mut self, chunk: &[u8], eof: bool, out: &mut Vec<u8>) {
-        self.held.extend_from_slice(chunk);
+    /// Masks what is held and writes it out, except the bytes from `hold` on, which wait for more
+    /// input.
+    fn process(&mut self, hold: usize, out: &mut Vec<u8>) {
         let buf = std::mem::take(&mut self.held);
         let Some(ac) = &self.masker.ac else {
             out.extend_from_slice(&buf);
@@ -124,11 +131,6 @@ impl Stream<'_> {
         };
         // A match starting before the hold point is final: any longer pattern starting at the
         // same offset would either be complete in `buf` or move the hold point before it.
-        let hold = if eof {
-            buf.len()
-        } else {
-            self.masker.hold_point(&buf)
-        };
         let mut pos = 0;
         for m in ac.find_iter(&buf) {
             if m.start() >= hold {
@@ -175,6 +177,10 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
 
 /// `serde_json`'s escaping, with non-ASCII as lower-case `\uXXXX` (surrogate pairs above
 /// U+FFFF, as Python's `json.dumps` writes it) and/or `/` as `\/` (as PHP's `json_encode` does).
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "private, and `variants` passes every combination of the two flags"
+)]
 fn json_variant(json: &str, ascii: bool, slash: bool) -> String {
     let mut s = String::with_capacity(json.len());
     for c in json.chars() {
@@ -183,7 +189,7 @@ fn json_variant(json: &str, ascii: bool, slash: bool) -> String {
             c if ascii && !c.is_ascii() => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {
-                    s.push_str(&format!("\\u{unit:04x}"));
+                    write!(s, "\\u{unit:04x}").expect("writing to a String cannot fail");
                 }
             }
             c => s.push(c),
@@ -192,15 +198,19 @@ fn json_variant(json: &str, ascii: bool, slash: bool) -> String {
     s
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "private, and `variants` passes both cases"
+)]
 fn percent_encode(v: &[u8], upper: bool) -> String {
     let mut s = String::new();
     for &b in v {
         if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            s.push(b as char);
+            s.push(char::from(b));
         } else if upper {
-            s.push_str(&format!("%{b:02X}"));
+            write!(s, "%{b:02X}").expect("writing to a String cannot fail");
         } else {
-            s.push_str(&format!("%{b:02x}"));
+            write!(s, "%{b:02x}").expect("writing to a String cannot fail");
         }
     }
     s

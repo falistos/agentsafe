@@ -101,11 +101,15 @@ impl Store {
             }
         };
         let identities = self.identity_file()?.into_identities()?;
-        let mut reader = Decryptor::new(file)?
-            .decrypt(identities.iter().map(|i| i.as_ref() as &dyn Identity))
-            .with_context(|| format!("cannot decrypt {}", self.vault.display()))?;
+        let cannot_decrypt = || format!("cannot decrypt {}", self.vault.display());
+        let mut reader = Decryptor::new(file)
+            .with_context(cannot_decrypt)?
+            .decrypt(identities.iter().map(|i| -> &dyn Identity { i.as_ref() }))
+            .with_context(cannot_decrypt)?;
         let mut plain = Zeroizing::new(Vec::new());
-        reader.read_to_end(&mut plain)?;
+        reader
+            .read_to_end(&mut plain)
+            .with_context(cannot_decrypt)?;
         // Parse errors quote the offending text, which is vault content: never surface them.
         std::str::from_utf8(&plain)
             .ok()
@@ -161,9 +165,10 @@ impl Store {
         }
         let plain = Zeroizing::new(toml::to_string(vault)?);
         let mut encrypted = Vec::new();
-        let mut writer =
-            Encryptor::with_recipients(recipients.iter().map(|r| r.as_ref() as &dyn Recipient))?
-                .wrap_output(&mut encrypted)?;
+        let mut writer = Encryptor::with_recipients(
+            recipients.iter().map(|r| -> &dyn Recipient { r.as_ref() }),
+        )?
+        .wrap_output(&mut encrypted)?;
         writer.write_all(plain.as_bytes())?;
         writer.finish()?;
         write_atomic(&self.vault, &encrypted)?;

@@ -55,7 +55,7 @@ pub enum Refusal {
 }
 
 impl fmt::Display for Refusal {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Refusal::NotFound(name) => write!(f, "no entry named {name}"),
             Refusal::Invalid(why) => f.write_str(why),
@@ -350,7 +350,7 @@ impl LocalBackend {
                     }
                     return Err(Refusal::NotFound(missing[0].into()).into());
                 }
-                names.iter().map(|n| n.to_string()).collect()
+                names.iter().map(ToString::to_string).collect()
             }
         };
         // Logged before the values leave the backend: if the audit write fails, none are released.

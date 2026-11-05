@@ -1,3 +1,9 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "a fixture or setup step that fails must panic the test, as unwrap does"
+)]
+
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -10,6 +16,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE};
 use secrecy::ExposeSecret;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const API_TOKEN: &str = "fixture-token-0123456789abcdef";
@@ -105,9 +112,8 @@ impl Home {
 /// An empty vault encrypted to `identity`, as `init` leaves it.
 fn write_empty_vault(dir: &Path, identity: &age::x25519::Identity) {
     let recipient = identity.to_public();
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-            .unwrap();
+    let recipient: &dyn age::Recipient = &recipient;
+    let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient)).unwrap();
     let mut encrypted = Vec::new();
     encryptor
         .wrap_output(&mut encrypted)
@@ -271,7 +277,7 @@ fn render_publishes_a_private_file_by_rename() {
         target.to_str().unwrap(),
     ]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(out.stdout.is_empty());
+    assert_eq!(text(&out.stdout), "");
     let mut seen = String::new();
     reader.read_to_string(&mut seen).unwrap();
     assert_eq!(seen, "old\n");
@@ -335,6 +341,39 @@ fn scrub_masks_every_known_value() {
     let input = format!("a {API_TOKEN} b {DB_PASSWORD} c\n");
     let out = home.agentsafe_stdin(&["scrub"], &input);
     assert_eq!(text(&out.stdout), "a ***app*** b ***db*** c\n");
+}
+
+/// Building the masker must stay fast on long periodic values, not only on random ones.
+#[test]
+fn scrub_masks_long_values_in_bounded_time() {
+    let repetitive = "abcdefgh".repeat(8 * 1024);
+    let random: String = (0u32..1024)
+        .map(|i| hex::encode(Sha256::digest(i.to_le_bytes())))
+        .collect();
+    for (name, value) in [("repetitive", &repetitive), ("random", &random)] {
+        assert_eq!(value.len(), 64 * 1024);
+        let home = Home::new();
+        let out = home.agentsafe_stdin(&["set", name, "--key", "K"], value);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let input = home.path("input.txt");
+        fs::write(&input, format!("before {value} after\n")).unwrap();
+        let mut child = home
+            .cmd(&["scrub"])
+            .stdin(File::open(&input).unwrap())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let status = wait_at_most(&mut child, Duration::from_secs(20));
+        assert!(status.is_some_and(|s| s.success()), "{name}: {status:?}");
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        assert_eq!(out, format!("before ***{name}*** after\n"));
+    }
 }
 
 fn mode(path: &Path) -> u32 {
@@ -636,6 +675,10 @@ fn render_reads_the_secrets_namespace() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario that checks the audit line of each operation in turn"
+)]
 fn audit_log_records_every_operation_and_never_a_value() {
     let home = Home::new();
     let set_value = "sk-audit-set-value-77";
@@ -876,7 +919,7 @@ fn a_missing_vault_is_an_error_everywhere() {
 
     let out = home.agentsafe_stdin(&["scrub"], &format!("token {API_TOKEN}\n"));
     assert!(!out.status.success());
-    assert!(out.stdout.is_empty());
+    assert_eq!(text(&out.stdout), "");
     assert!(
         text(&out.stderr).contains("no vault at"),
         "{}",
@@ -895,6 +938,21 @@ fn a_missing_vault_is_an_error_everywhere() {
     let out = home.agentsafe_stdin(&["set", "x", "--key", "K"], "value-123456\n");
     assert!(!out.status.success());
     assert!(!home.path("vault.age").exists());
+}
+
+#[test]
+fn a_corrupt_vault_is_named_in_the_error() {
+    let home = Home::new();
+    fs::write(home.path("vault.age"), "not an age file\n").unwrap();
+    let out = home.agentsafe(&["list"]);
+    assert!(!out.status.success());
+    let vault = home.path("vault.age");
+    let expected = format!("cannot decrypt {}", vault.display());
+    assert!(
+        text(&out.stderr).contains(&expected),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]
@@ -1099,7 +1157,7 @@ fn json_ascii(value: &str) -> String {
             c => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {
-                    out.push_str(&format!("\\u{unit:04x}"));
+                    write!(out, "\\u{unit:04x}").expect("writing to a String cannot fail");
                 }
             }
         }
@@ -1120,7 +1178,7 @@ fn run_and_scrub_mask_the_extra_json_and_percent_spellings() {
         value
             .bytes()
             .map(|b| match b {
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' => (b as char).to_string(),
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' => char::from(b).to_string(),
                 b => format!("%{b:02x}"),
             })
             .collect(),

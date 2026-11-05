@@ -1,5 +1,11 @@
 //! `agentsafe serve` behind a stand-in for `tailscale serve`, and the CLI in remote mode.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "a fixture or setup step that fails must panic the test, as unwrap does"
+)]
+
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -25,9 +31,8 @@ const PEER: &str = "100.101.102.103";
 /// An empty vault encrypted to `identity`, as `init` leaves it.
 fn write_empty_vault(dir: &Path, identity: &age::x25519::Identity) {
     let recipient = identity.to_public();
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-            .unwrap();
+    let recipient: &dyn age::Recipient = &recipient;
+    let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient)).unwrap();
     let mut encrypted = Vec::new();
     encryptor
         .wrap_output(&mut encrypted)
@@ -193,7 +198,7 @@ fn terminate(child: &Child) {
         .args(["-TERM", &child.id().to_string()])
         .status()
         .unwrap();
-    assert!(killed.success());
+    assert!(killed.success(), "kill -TERM {}: {killed}", child.id());
 }
 
 /// The exit status, or `None` if the child still runs after `limit`.
@@ -244,7 +249,7 @@ impl Proxy {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let headers = Arc::new(Mutex::new(Vec::new()));
-        let shared = headers.clone();
+        let shared = Arc::clone(&headers);
         let socket = socket.to_path_buf();
         thread::spawn(move || {
             for conn in listener.incoming() {
@@ -301,7 +306,7 @@ fn forward(mut client: TcpStream, socket: &Path, injected: &[(String, String)]) 
     }
     out.push_str("Host: localhost\r\nConnection: close\r\n");
     for (name, value) in injected {
-        out.push_str(&format!("{name}: {value}\r\n"));
+        write!(out, "{name}: {value}\r\n").unwrap();
     }
     out.push_str("\r\n");
     let mut server = UnixStream::connect(socket).unwrap();
@@ -322,11 +327,25 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// Status and body of an API request through the proxy, with the CSRF header unless `csrf` is false.
-fn api(proxy: &Proxy, method: &str, path: &str, body: Option<&str>, csrf: bool) -> (u16, String) {
+/// Status and body of an API request through the proxy, with the CSRF header.
+fn api(proxy: &Proxy, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    send_api(proxy, method, path, body, "1")
+}
+
+/// `api` with `Sec-Agentsafe: 0`, which the server refuses.
+fn api_without_csrf(proxy: &Proxy, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    send_api(proxy, method, path, body, "0")
+}
+
+fn send_api(
+    proxy: &Proxy,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    csrf: &str,
+) -> (u16, String) {
     let agent = agent();
     let url = proxy.url(path);
-    let csrf = if csrf { "1" } else { "0" };
     // A client-sent capability header, which the proxy must drop like Serve does.
     let forged = caps(r#"{"entries": ["*"], "actions": ["admin"]}"#);
     let response = match (method, body) {
@@ -402,7 +421,7 @@ fn requests_without_a_grant_or_the_csrf_header_are_refused_everywhere() {
     for peer in &peers {
         proxy.peer(peer.as_deref(), None);
         for (method, path, body) in ROUTES {
-            let (status, body) = api(&proxy, method, path, body, true);
+            let (status, body) = api(&proxy, method, path, body);
             assert_eq!(status, 403, "{peer:?} {method} {path}: {body}");
             assert_no_value(&body);
         }
@@ -410,7 +429,7 @@ fn requests_without_a_grant_or_the_csrf_header_are_refused_everywhere() {
 
     proxy.peer(Some(&admin), Some("alice@example.com"));
     for (method, path, body) in &ROUTES[..5] {
-        let (status, body) = api(&proxy, method, path, *body, false);
+        let (status, body) = api_without_csrf(&proxy, method, path, *body);
         assert_eq!(status, 403, "no CSRF header: {method} {path}: {body}");
     }
 
@@ -485,22 +504,13 @@ fn grants_decide_what_is_listed_described_and_fetched() {
     );
 
     // Existence is only revealed to a caller who could list the name.
-    let describe = |name: &str| {
-        api(
-            &proxy,
-            "GET",
-            &format!("/api/v1/entries/{name}"),
-            None,
-            true,
-        )
-        .0
-    };
+    let describe = |name: &str| api(&proxy, "GET", &format!("/api/v1/entries/{name}"), None).0;
     assert_eq!(describe("app"), 200);
     assert_eq!(describe("other"), 403);
     assert_eq!(describe("missing"), 403);
     assert_eq!(describe("app-missing"), 404);
 
-    let fetch = |body: &str| api(&proxy, "POST", "/api/v1/fetch", Some(body), true);
+    let fetch = |body: &str| api(&proxy, "POST", "/api/v1/fetch", Some(body));
     let (status, body) = fetch(r#"{"names": ["app", "db"]}"#);
     assert_eq!(status, 403, "{body}");
     assert_no_value(&body);
@@ -622,7 +632,7 @@ fn remote_run_set_edit_and_rm_act_on_the_server_vault() {
 
     let oversized = format!(r#"{{"values": {{"K": "{}"}}}}"#, "x".repeat(70 * 1024));
     assert_eq!(
-        api(&proxy, "PUT", "/api/v1/entries/big", Some(&oversized), true).0,
+        api(&proxy, "PUT", "/api/v1/entries/big", Some(&oversized)).0,
         413
     );
 
@@ -739,7 +749,7 @@ fn an_invalid_field_is_refused_without_being_echoed() {
         Some("alice@example.com"),
     );
     let body = serde_json::json!({ "meta": { "rotate_by": API_TOKEN } }).to_string();
-    let (status, answer) = api(&proxy, "PUT", "/api/v1/entries/app", Some(&body), true);
+    let (status, answer) = api(&proxy, "PUT", "/api/v1/entries/app", Some(&body));
     assert_eq!(status, 400);
     assert_no_value(&answer);
     assert!(answer.contains("YYYY-MM-DD"));
@@ -1033,7 +1043,7 @@ fn non_get_ui_requests_need_a_same_origin_signal() {
     for headers in refused {
         let reply = edit("attacker", headers);
         assert_eq!(reply.status, 403, "{headers:?}");
-        assert!(!reply.header("content-security-policy").is_empty());
+        assert_ne!(reply.header("content-security-policy"), "");
     }
     // The refusal came before the write.
     assert!(!server.home.ok(&["describe", "db"]).contains("owner:"));
@@ -1193,7 +1203,7 @@ fn fake_ntfy() -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/topic", listener.local_addr().unwrap());
     let received = Arc::new(Mutex::new(Vec::new()));
-    let shared = received.clone();
+    let shared = Arc::clone(&received);
     thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(mut conn) = conn else { break };
@@ -1226,7 +1236,7 @@ fn server_with_ntfy(url: Option<&str>) -> Server {
     let home = Home::local();
     if let Some(url) = url {
         let mut config = fs::read_to_string(home.path("config.toml")).unwrap();
-        config.push_str(&format!("\n[serve]\nntfy = {url:?}\n"));
+        write!(config, "\n[serve]\nntfy = {url:?}\n").unwrap();
         fs::write(home.path("config.toml"), config).unwrap();
     }
     Server::start(home)
@@ -1252,7 +1262,7 @@ fn reveal_needs_a_reason_audits_it_and_notifies_without_the_value() {
         assert_eq!(reply.status, 400, "{reason:?}");
         assert_no_value(&reply.body);
     }
-    assert!(reveal_lines(&server).is_empty());
+    assert_eq!(reveal_lines(&server), Vec::<serde_json::Value>::new());
     assert!(received.lock().unwrap().is_empty());
     // Nobody reveals what they cannot administer.
     proxy.peer(Some(&admin_of(r#""db*""#)), Some("bob@example.com"));
@@ -1461,7 +1471,7 @@ fn saving_one_field_keeps_list_items_that_contain_a_comma() {
         ],
     );
     assert_eq!(reply.status, 303, "{}", reply.body);
-    let (status, body) = api(&proxy, "GET", "/api/v1/entries/db", None, true);
+    let (status, body) = api(&proxy, "GET", "/api/v1/entries/db", None);
     assert_eq!(status, 200);
     let entry: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
@@ -1483,7 +1493,7 @@ fn saving_one_field_keeps_list_items_that_contain_a_comma() {
         &[("tags", "one\r\n\r\n  two  \r\n"), ("used_by", "")],
     );
     assert_eq!(reply.status, 303);
-    let (_, body) = api(&proxy, "GET", "/api/v1/entries/db", None, true);
+    let (_, body) = api(&proxy, "GET", "/api/v1/entries/db", None);
     let entry: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(entry["tags"], serde_json::json!(["one", "two"]), "{body}");
     assert!(entry.get("used_by").is_none(), "{body}");

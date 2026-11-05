@@ -25,7 +25,7 @@ use super::{AppState, Ctx, blocking};
 use crate::backend::{Backend, Expect, MetaPatch, Put, Refusal, Values};
 use crate::dotenv;
 use crate::policy::Action;
-use crate::vault::{Catalog, CatalogEntry, validate_name};
+use crate::vault::{Catalog, CatalogEntry, Meta, validate_name};
 
 const NTFY_TIMEOUT: Duration = Duration::from_secs(3);
 const AUDIT_LINES: usize = 200;
@@ -129,8 +129,9 @@ impl IntoResponse for UiError {
             status => self.status.as_u16(),
             message => self.message,
             notice => Option::<&str>::None,
+            audit => false,
         };
-        render(self.status, "error.html", false, page)
+        render(self.status, "error.html", page)
     }
 }
 
@@ -149,9 +150,11 @@ impl From<anyhow::Error> for UiError {
     }
 }
 
-fn render(status: StatusCode, template: &str, audit: bool, page: Value) -> Response {
-    let ctx = context! { audit => audit, ..page };
-    match TEMPLATES.get_template(template).and_then(|t| t.render(ctx)) {
+fn render(status: StatusCode, template: &str, page: Value) -> Response {
+    match TEMPLATES
+        .get_template(template)
+        .and_then(|t| t.render(page))
+    {
         Ok(html) => (status, Html(html)).into_response(),
         Err(e) => {
             eprintln!("agentsafe: cannot render {template}: {e}");
@@ -166,7 +169,8 @@ fn admin_everywhere(ctx: &Ctx) -> bool {
 }
 
 fn page(template: &str, ctx: &Ctx, extra: Value) -> Response {
-    render(StatusCode::OK, template, admin_everywhere(ctx), extra)
+    let page = context! { audit => admin_everywhere(ctx), ..extra };
+    render(StatusCode::OK, template, page)
 }
 
 async fn record_denied(
@@ -200,7 +204,7 @@ async fn admin_catalog(
     if !ctx.rights.has_admin() {
         return Err(deny(state, ctx, action, None).await);
     }
-    Ok(blocking(state, |b| b.catalog())
+    Ok(blocking(state, Backend::catalog)
         .await?
         .into_iter()
         .filter(|(name, _)| ctx.rights.allows(Action::Admin, name))
@@ -233,8 +237,8 @@ struct Done {
     done: Option<String>,
 }
 
-fn notice(done: Option<String>) -> Option<&'static str> {
-    match done.as_deref() {
+fn notice(done: Option<&str>) -> Option<&'static str> {
+    match done {
         Some("created") => Some("Entry created."),
         Some("values") => Some("Values replaced."),
         Some("meta") => Some("Metadata saved."),
@@ -284,7 +288,7 @@ async fn index(
         .into_iter()
         .map(|(name, entry)| EntryRow::new(name, entry, today))
         .collect();
-    let extra = context! { entries => Value::from(Serde(&entries)), notice => notice(done.done) };
+    let extra = context! { entries => Value::from(Serde(&entries)), notice => notice(done.done.as_deref()) };
     Ok(page("index.html", &ctx, extra))
 }
 
@@ -295,7 +299,7 @@ async fn entry(
     Query(done): Query<Done>,
 ) -> UiResult {
     let name = admin_name(&state, &ctx, name, "describe").await?;
-    let mut catalog = blocking(&state, |b| b.catalog()).await?;
+    let mut catalog = blocking(&state, Backend::catalog).await?;
     let Some(found) = catalog.remove(&name) else {
         return Err(anyhow::Error::from(Refusal::NotFound(name)).into());
     };
@@ -303,7 +307,7 @@ async fn entry(
     let extra = context! {
         e => Value::from(Serde(&e)),
         ntfy => state.ntfy.is_some(),
-        notice => notice(done.done),
+        notice => notice(done.done.as_deref()),
     };
     Ok(page("entry.html", &ctx, extra))
 }
@@ -404,7 +408,7 @@ async fn new_form(State(state): State<AppState>, Extension(ctx): Extension<Arc<C
     let blank = EntryRow::new(
         String::new(),
         CatalogEntry {
-            meta: Default::default(),
+            meta: Meta::default(),
             keys: Vec::new(),
             unmasked: Vec::new(),
         },
@@ -545,7 +549,7 @@ async fn audit(State(state): State<AppState>, Extension(ctx): Extension<Arc<Ctx>
     if !admin_everywhere(&ctx) {
         return Err(deny(&state, &ctx, "audit", None).await);
     }
-    let path = state.audit.clone();
+    let path = Arc::clone(&state.audit);
     let rows = blocking(&state, move |_| audit_tail(&path)).await?;
     let extra = context! { rows => Value::from(Serde(&rows)), notice => Option::<&str>::None };
     Ok(page("audit.html", &ctx, extra))

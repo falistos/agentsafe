@@ -386,7 +386,8 @@ fn run_child(backend: &dyn Backend, specs: &[EnvSpec], command: &[OsString]) -> 
     let code = status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
-    Ok(ExitCode::from(code as u8))
+    // Exit codes are 0-255 and signals add 128 to a number under 128.
+    Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)))
 }
 
 /// If our own output closes, keep draining the child so it is not blocked on a full pipe.
