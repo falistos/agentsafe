@@ -13,24 +13,22 @@
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::net::UnixStream;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD};
-use secrecy::ExposeSecret;
 use tempfile::TempDir;
 
+mod common;
+#[path = "common/proxy.rs"]
+mod proxy;
+
+use common::{fixtures, local_dir, text};
+use proxy::{Proxy, caps, wait_for_socket};
+
 const MARKER: &str = "leakmark-Zq7XcV4n2Pw9";
-const CAP: &str = "github.com/falistos/agentsafe/cap/agentsafe";
-const PEER: &str = "100.101.102.103";
 const ADMIN: &str = r#"{"entries": ["*"], "actions": ["admin"]}"#;
 
 /// The marker and its base64 (standard and URL-safe) at the three alignments it can have inside
@@ -63,12 +61,8 @@ struct Lab {
 
 impl Lab {
     fn local() -> Lab {
-        let dir = tempfile::tempdir().unwrap();
-        let identity = age::x25519::Identity::generate();
-        let key = dir.path().join("key.txt");
-        fs::write(&key, format!("{}\n", identity.to_string().expose_secret())).unwrap();
-        let lab = Lab { dir };
-        lab.config("config.toml", &format!("identity = {:?}\n", key.display()));
+        let lab = Lab { dir: local_dir() };
+        let key = lab.path("key.txt");
         // A server whose ntfy topic is the marker, and which cannot reach it.
         lab.config(
             "ntfy.toml",
@@ -77,23 +71,6 @@ impl Lab {
                 key.display()
             ),
         );
-        let recipient = identity.to_public();
-        let recipient: &dyn age::Recipient = &recipient;
-        let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient)).unwrap();
-        let mut encrypted = Vec::new();
-        encryptor
-            .wrap_output(&mut encrypted)
-            .unwrap()
-            .finish()
-            .unwrap();
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(lab.path("vault.age"))
-            .unwrap()
-            .write_all(&encrypted)
-            .unwrap();
         fs::create_dir(lab.path("work")).unwrap();
         lab
     }
@@ -151,14 +128,7 @@ impl Server {
             .spawn()
             .unwrap();
         let mut server = Server { child, socket };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while UnixStream::connect(&server.socket).is_err() {
-            if let Some(status) = server.child.try_wait().unwrap() {
-                panic!("serve exited: {status}");
-            }
-            assert!(Instant::now() < deadline, "serve did not start");
-            thread::sleep(Duration::from_millis(20));
-        }
+        wait_for_socket(&server.socket, &mut server.child);
         server
     }
 }
@@ -170,81 +140,11 @@ impl Drop for Server {
     }
 }
 
-/// Stands in for `tailscale serve --accept-app-caps`: forwards HTTP from TCP to the socket with
-/// the capability header the test chooses.
-struct Proxy {
-    addr: String,
-}
-
-impl Proxy {
-    fn start(socket: &Path, caps: Option<&str>) -> Proxy {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        let mut headers = vec![
-            ("X-Forwarded-For".to_string(), PEER.to_string()),
-            (
-                "Tailscale-User-Login".to_string(),
-                "alice@example.com".to_string(),
-            ),
-        ];
-        if let Some(caps) = caps {
-            headers.push((
-                "Tailscale-App-Capabilities".to_string(),
-                format!(r#"{{"{CAP}": [{caps}]}}"#),
-            ));
-        }
-        let headers = Arc::new(headers);
-        let socket = socket.to_path_buf();
-        thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(conn) = conn else { break };
-                let injected = Arc::clone(&headers);
-                let socket = socket.clone();
-                thread::spawn(move || forward(conn, &socket, &injected));
-            }
-        });
-        Proxy { addr }
-    }
-}
-
-fn forward(mut client: TcpStream, socket: &Path, injected: &[(String, String)]) {
-    let mut head = Vec::new();
-    let mut byte = [0u8];
-    while !head.ends_with(b"\r\n\r\n") {
-        if client.read(&mut byte).unwrap_or(0) == 0 {
-            return;
-        }
-        head.push(byte[0]);
-    }
-    let head = String::from_utf8(head).unwrap();
-    let mut lines = head.split("\r\n").filter(|l| !l.is_empty());
-    let mut out = format!("{}\r\n", lines.next().unwrap());
-    for line in lines {
-        let name = line.split(':').next().unwrap().trim().to_ascii_lowercase();
-        let dropped = name == "tailscale-app-capabilities"
-            || name.starts_with("tailscale-user-")
-            || name.starts_with("x-forwarded-")
-            || name == "host"
-            || name == "connection";
-        if !dropped {
-            out.push_str(line);
-            out.push_str("\r\n");
-        }
-    }
-    out.push_str("Host: localhost\r\nConnection: close\r\n");
-    for (name, value) in injected {
-        write!(out, "{name}: {value}\r\n").unwrap();
-    }
-    out.push_str("\r\n");
-    let mut server = UnixStream::connect(socket).unwrap();
-    server.write_all(out.as_bytes()).unwrap();
-    let (mut from_client, mut to_server) =
-        (client.try_clone().unwrap(), server.try_clone().unwrap());
-    thread::spawn(move || {
-        let _ = io::copy(&mut from_client, &mut to_server);
-    });
-    let _ = io::copy(&mut server, &mut client);
-    let _ = client.shutdown(Shutdown::Both);
+/// A `Proxy` for a peer with these grants, none when `grants` is `None`.
+fn peer_proxy(socket: &Path, grants: Option<&str>) -> Proxy {
+    let proxy = Proxy::start(socket);
+    proxy.peer(grants.map(caps).as_deref(), Some("alice@example.com"));
+    proxy
 }
 
 /// What a case must do for its error path to count as reached.
@@ -394,7 +294,7 @@ impl Sweep {
             .into();
         let mut request = ureq::http::Request::builder()
             .method(method)
-            .uri(format!("http://{}{path}", proxy.addr));
+            .uri(proxy.url(path));
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
@@ -688,11 +588,11 @@ fn no_error_path_leaks_a_value() {
     config_cases(&lab, &mut sweep);
 
     let server = Server::start(&lab, "ntfy.toml");
-    let admin = Proxy::start(&server.socket, Some(ADMIN));
+    let admin = peer_proxy(&server.socket, Some(ADMIN));
     api_cases(&mut sweep, &admin);
     ui_cases(&mut sweep, &admin);
-    let nobody = Proxy::start(&server.socket, None);
-    let reader = Proxy::start(
+    let nobody = peer_proxy(&server.socket, None);
+    let reader = peer_proxy(
         &server.socket,
         Some(r#"{"entries": ["app"], "actions": ["get"]}"#),
     );
@@ -716,9 +616,8 @@ fn no_error_path_leaks_a_value() {
 /// `set`, `edit` and `import`: stdin, every metadata flag, and an invalid date.
 fn cli_store_cases(lab: &Lab, sweep: &mut Sweep) {
     use Outcome::{Refused, Served};
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/env");
     for name in ["app", "db"] {
-        let file = fixtures.join(format!("{name}.env"));
+        let file = fixtures().join(format!("{name}.env"));
         let args = ["import", file.to_str().unwrap(), "--name", name];
         sweep.local(lab, "fixture", &args, b"", Served);
     }
@@ -1150,7 +1049,7 @@ fn ui_page_cases(sweep: &mut Sweep, proxy: &Proxy) {
         &reveal,
         Served,
     );
-    if !String::from_utf8_lossy(&reply.body).contains("fixture-token-0123456789abcdef") {
+    if !text(&reply.body).contains("fixture-token-0123456789abcdef") {
         sweep
             .problems
             .push("POST /e/app/reveal: the reveal did not show the value".into());
