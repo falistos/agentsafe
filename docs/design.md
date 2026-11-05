@@ -190,7 +190,7 @@ All paths are under `/api/v1/`. Bodies are JSON, at most 64 KiB. An error answer
 |---|---|---|
 | `GET /api/v1/entries` | `list` | `{"entries": {NAME: CATALOG_ENTRY}}`, only the entries the caller may list. |
 | `GET /api/v1/entries/NAME` | `list` on NAME | `CATALOG_ENTRY`. 403 whether or not the entry exists, when not allowed. |
-| `PUT /api/v1/entries/NAME` | `put` on NAME | Body `{"values": {KEY: VALUE}, "meta": META_PATCH}`, either or both. 204. With `meta` only, the entry must exist. |
+| `PUT /api/v1/entries/NAME` | `put` on NAME | Body `{"values": {KEY: VALUE}, "merge": {KEY: VALUE}, "meta": META_PATCH}`, at least one. `values` replaces all of the entry's values; `merge` sets those keys and keeps the others (the entry is created if missing); not both. 204, or with `merge` 200 `{"keys": N}`, the entry's key count. With `meta` only, the entry must exist. |
 | `DELETE /api/v1/entries/NAME` | `admin` on NAME | 204. |
 | `POST /api/v1/fetch` | `get` on each name | Body `{"names": [NAME, ...]}` or `{"all": true}`. `{"entries": {NAME: {KEY: VALUE}}}`. One forbidden name refuses the whole request; `all` returns the entries the caller may get. |
 
