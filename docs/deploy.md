@@ -19,8 +19,8 @@ sudo install -d -o agentsafe -g agentsafe -m 0700 /var/lib/agentsafe
 sudo -u agentsafe env AGENTSAFE_CONFIG=/var/lib/agentsafe/config.toml agentsafe init
 ```
 
-`init` prints the public key and writes `/var/lib/agentsafe/config.toml` and `identity.txt`. Add the
-server settings to the config:
+`init` prints the public key and writes `/var/lib/agentsafe/config.toml`, `identity.txt` and an
+empty `vault.age`. Add the server settings to the config:
 
 ```toml
 identity = "/var/lib/agentsafe/identity.txt"
@@ -50,7 +50,7 @@ Group=agentsafe
 Environment=AGENTSAFE_CONFIG=/var/lib/agentsafe/config.toml
 ExecStart=/usr/local/bin/agentsafe serve
 Restart=on-failure
-# serve gives open requests 5 s after SIGTERM.
+# serve gives open requests 5 s after SIGTERM; a write waits at most 5 s for vault.lock.
 TimeoutStopSec=15
 
 StateDirectory=agentsafe
@@ -172,7 +172,8 @@ is recorded as `"notify": "failed"`.
 ## 7. Backups
 
 Back up `vault.age` and `identity.txt`, separately: together they give every value. `catalog.toml`
-is regenerated on the next write; keep `audit.jsonl` if the history matters.
+is regenerated on the next write; keep `audit.jsonl` if the history matters. Without `vault.age`
+every command fails with `no vault at PATH`: restore it, or run `init` on a new directory.
 
 Keep an offline recovery recipient, so that losing the server's identity does not lose the vault:
 

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -49,11 +49,11 @@ impl Config {
     }
 
     pub fn load() -> Result<Config> {
-        let path = Config::path()?;
+        // Absolute, so the directory of a bare `config.toml` is not empty.
+        let path = std::path::absolute(Config::path()?)?;
         let text = fs::read_to_string(&path)
             .with_context(|| format!("cannot read config {}", path.display()))?;
-        let raw: RawConfig =
-            toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
+        let raw: RawConfig = toml::from_str(&text).map_err(|e| parse_error(&path, &text, &e))?;
         let mode = match (raw.identity, raw.server) {
             (Some(identity), None) => Mode::Local {
                 identity: match identity.strip_prefix("~") {
@@ -84,6 +84,27 @@ impl Config {
     pub fn dir(&self) -> &Path {
         self.path.parent().unwrap_or(Path::new("."))
     }
+}
+
+/// TOML errors quote the offending line, which can hold the ntfy URL: report only where it is
+/// and what kind of error it is.
+fn parse_error(path: &Path, text: &str, e: &toml::de::Error) -> anyhow::Error {
+    let kind = if toml::from_str::<toml::Table>(text).is_err() {
+        "not valid TOML"
+    } else {
+        "an unknown setting or a value of the wrong type"
+    };
+    let Some(span) = e.span() else {
+        return anyhow!("invalid config {}: {kind}", path.display());
+    };
+    let before = text.get(..span.start).unwrap_or(text);
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    anyhow!(
+        "invalid config {}: {kind} at line {}, column {}",
+        path.display(),
+        before.matches('\n').count() + 1,
+        before[line_start..].chars().count() + 1
+    )
 }
 
 pub fn home() -> Result<PathBuf> {

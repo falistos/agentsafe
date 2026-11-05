@@ -31,12 +31,17 @@ The config directory holds:
 | `catalog.toml` | A plaintext export of names, metadata and key names. |
 | `audit.jsonl` | The audit log. |
 
-`init` creates the directory 0700 and the config and identity 0600. The vault and the catalog are
-written to a temporary file and renamed into place, so readers never see a partial file and the
-mode stays 0600. A write loads, changes and saves the vault under an exclusive lock on
-`vault.lock`, so concurrent `set`, `edit` and `rm` (and server requests) do not lose each other's
-changes; readers take no lock. Adding a recipient takes effect at the next write, which re-encrypts
-the vault to the new list.
+`init` creates the directory 0700 and the config, the identity and an empty vault 0600; it never
+overwrites one of them. `init --server` creates no vault. A missing `vault.age` is an error for
+every command (`no vault at PATH`), never an empty vault: otherwise `scrub` would mask nothing
+after a lost or half-restored vault. The vault and the catalog are written to a temporary file and
+renamed into place, so readers never see a partial file and the mode stays 0600. A write loads,
+changes and saves the vault under an exclusive lock on `vault.lock`, so concurrent `set`, `edit`
+and `rm` (and server requests) do not lose each other's changes; readers take no lock. A write
+waits at most 5 s for the lock, then fails with `vault is busy` and changes nothing. Saving the
+vault commits the write: if the `catalog.toml` export fails after it, the command warns on stderr
+and succeeds. Adding a recipient takes effect at the next write, which re-encrypts the vault to the
+new list.
 
 ### Catalog
 
@@ -58,8 +63,10 @@ kinds of vault access are not logged:
 
 A line records the outcome of the vault access, not of the whole command: argument and input errors
 that never reach the vault are not logged, and a `run` whose key lookup or child fails after a
-successful fetch stays `ok`. The line is written before any value leaves the backend; if it cannot
-be written, no value is released. The format is at the end of this document.
+successful fetch stays `ok`. For a fetch, the line is written before any value leaves the backend;
+if it cannot be written, no value is released. A write opens the log before it touches the vault:
+if the log cannot be opened, nothing changes and the command fails; the line is appended once the
+write is done. The format is at the end of this document.
 
 ### Backend seam
 
@@ -124,7 +131,8 @@ so only the server user (and root, which `tailscaled` runs as) can connect. `ser
 exclusive lock on `<socket>.lock` while it runs: a second `serve` on the same socket is refused,
 and a socket left by a crashed server is removed. On SIGTERM or SIGINT it stops accepting, gives
 open requests at most 5 s, then removes the socket. A write runs whole under `vault.lock`, so
-cutting a request never leaves a half-written vault.
+cutting a request never leaves a half-written vault; since a write waits at most 5 s for that lock,
+shutdown takes at most about 10 s plus the save of a write already started.
 
 ### CSRF
 
@@ -136,11 +144,10 @@ could send requests to the server with the owner's grants.
 - The UI accepts a request other than GET or HEAD only with `Sec-Fetch-Site: same-origin` or
   `none`, or, when the browser sends no `Sec-Fetch-Site`, with an `Origin` whose host is the
   `X-Forwarded-Host` that Serve sets. This is the rule of Go's `http.CrossOriginProtection`.
-- UI answers carry `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
-  form-action 'self'; frame-ancestors 'none'` and `Referrer-Policy: no-referrer`; every answer
-  carries `Cache-Control: no-store`. Open item: refusals from the authorization layer (no grant,
-  missing header) and unknown UI paths miss the CSP and `Referrer-Policy`
-  ([#7](https://github.com/falistos/agentsafe/issues/7)).
+- Every answer outside `/api/`, refusals and unknown paths included, carries
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self';
+  frame-ancestors 'none'` and `Referrer-Policy: no-referrer`; every answer carries
+  `Cache-Control: no-store`.
 
 ## Capability
 

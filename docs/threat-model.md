@@ -30,18 +30,23 @@ Stops:
 - No command prints a value: `list` and `describe` show names and metadata, `set` and `import` take
   values from stdin or a file, never from arguments.
 - `run` masks the values of the entries it injects in the child's stdout and stderr; `scrub` masks
-  every entry the caller may get. Both cover the raw value, base64, hex, JSON as `serde_json`
-  writes it and percent-encoding with upper-case hex (exact spellings in the README).
-- `render` refuses a stdout that is not a regular file and makes it 0600.
+  every entry the caller may get. Both cover the raw value; base64, standard and URL-safe, at the
+  three alignments a value can have inside a larger blob; hex, lower and upper case; JSON as
+  `serde_json` escapes it, also with non-ASCII characters as lower-case `\uXXXX` (surrogate pairs
+  above U+FFFF, as Python's `json.dumps` writes them), with `/` as `\/`, or both; and
+  percent-encoding with upper- or lower-case hex (`A-Z a-z 0-9 - . _ ~` left as is).
+- `render -o FILE` writes a new file created 0600 and renames it over FILE, so a process that had
+  opened the old FILE never reads the values. A missing vault is an error, so `scrub` never passes
+  text through unmasked because the vault was lost.
 - Error messages never quote a value: `.env` errors give a line number, template errors give the
-  kind and the line, a vault that does not parse is reported without its content, API errors never
-  echo the request body.
-- Every value fetch and write is audited, and no value is released when its audit line cannot be
-  written. Successful `list` and `describe` are not logged; they return no value.
+  kind and the line, config errors give the line, the column and the kind, a vault that does not
+  parse is reported without its content, API errors never echo the request body.
+- Every value fetch and write is audited. No value is released when its audit line cannot be
+  written, and no write is made when the audit log cannot be opened. Successful `list` and
+  `describe` are not logged; they return no value.
 
-Does not stop: a spelling the masker does not cover, such as JSON `\uXXXX` escapes of non-ASCII
-characters (Python's `json.dumps` default), `\/`, or lower-case percent escapes, all of which an
-ordinary tool can print by accident; a value transformed before printing, written to a file or sent over the network from
+Does not stop: a spelling the masker does not cover, such as base32, upper-case `\uXXXX` escapes or
+percent-encoding of unreserved characters; a value transformed before printing, written to a file or sent over the network from
 inside `run`, read back from a rendered file, or a value of another entry that the child reads
 elsewhere (`run` does not mask it). In local mode the agent can read `identity.txt`. In remote mode
 it holds the fetched values in memory and can call the API with its host's grants.
@@ -51,7 +56,7 @@ it holds the fetched values in memory and can call the API with its host's grant
 Other accounts on the client or the vault host.
 
 Stops: the config directory is 0700; the config, identity, vault, catalog, lock, audit log, socket
-lock and socket are 0600. A rendered file is 0600.
+lock and socket are 0600. A rendered file is 0600 from its creation.
 
 Does not stop: root, or anything running as the owner or the server user.
 
@@ -82,12 +87,11 @@ Stops:
   preflight that the server never grants.
 - The UI refuses a state-changing request unless `Sec-Fetch-Site` is `same-origin` or `none`, or,
   without that header, unless `Origin` matches `X-Forwarded-Host`.
-- UI pages send a strict CSP with `frame-ancestors 'none'`, `Referrer-Policy: no-referrer`, and
-  `Cache-Control: no-store` on every answer, so a revealed value is not cached.
+- Every answer outside `/api/`, refusals included, sends a strict CSP with `frame-ancestors 'none'`
+  and `Referrer-Policy: no-referrer`, and every answer sends `Cache-Control: no-store`, so a
+  revealed value is not cached.
 
 Does not stop: a compromised browser or extension, or someone at the owner's unlocked screen.
-Authorization refusals and unknown paths miss the CSP and `Referrer-Policy`
-([#7](https://github.com/falistos/agentsafe/issues/7)); they carry no value.
 
 ## Assumptions
 

@@ -9,7 +9,14 @@ use sha2::{Digest, Sha256};
 ///
 /// Errors carry a line number only, never the line, which may hold a value.
 pub fn parse(input: &str) -> Result<BTreeMap<String, String>> {
-    let chars: Vec<char> = input.chars().collect();
+    // CRLF line endings read as LF, inside quoted values too; a lone `\r` is kept.
+    let mut chars: Vec<char> = Vec::with_capacity(input.len());
+    let mut it = input.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\r' || it.peek() != Some(&'\n') {
+            chars.push(c);
+        }
+    }
     let mut p = Parser {
         chars: &chars,
         pos: 0,

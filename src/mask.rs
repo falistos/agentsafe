@@ -162,18 +162,45 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
     out.push(hex::encode(v).into_bytes());
     out.push(hex::encode_upper(v).into_bytes());
     let json = serde_json::to_string(value).expect("a string always serializes");
-    out.push(json.as_bytes()[1..json.len() - 1].to_vec());
-    out.push(percent_encode(v).into_bytes());
+    let json = &json[1..json.len() - 1];
+    for ascii in [false, true] {
+        for slash in [false, true] {
+            out.push(json_variant(json, ascii, slash).into_bytes());
+        }
+    }
+    out.push(percent_encode(v, true).into_bytes());
+    out.push(percent_encode(v, false).into_bytes());
     out
 }
 
-fn percent_encode(v: &[u8]) -> String {
+/// `serde_json`'s escaping, with non-ASCII as lower-case `\uXXXX` (surrogate pairs above
+/// U+FFFF, as Python's `json.dumps` writes it) and/or `/` as `\/` (as PHP's `json_encode` does).
+fn json_variant(json: &str, ascii: bool, slash: bool) -> String {
+    let mut s = String::with_capacity(json.len());
+    for c in json.chars() {
+        match c {
+            '/' if slash => s.push_str("\\/"),
+            c if ascii && !c.is_ascii() => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    s.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+            c => s.push(c),
+        }
+    }
+    s
+}
+
+fn percent_encode(v: &[u8], upper: bool) -> String {
     let mut s = String::new();
     for &b in v {
         if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
             s.push(b as char);
-        } else {
+        } else if upper {
             s.push_str(&format!("%{b:02X}"));
+        } else {
+            s.push_str(&format!("%{b:02x}"));
         }
     }
     s
@@ -275,7 +302,7 @@ mod tests {
             hex::encode(SECRET),
             hex::encode_upper(SECRET),
             json,
-            format!("https://x/?t={}", percent_encode(SECRET.as_bytes())),
+            format!("https://x/?t={}", percent_encode(SECRET.as_bytes(), true)),
         ] {
             let out = mask(&m, &[text.as_bytes()]);
             assert!(out.contains("***tok***"), "{text} -> {out}");
