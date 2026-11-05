@@ -225,7 +225,11 @@ fn expose_values<S: Serializer>(
 /// The temp file is created 0600 by `tempfile` and renamed over the target, so readers never see
 /// a partial file and the mode never widens.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
+    // A bare file name has an empty parent, which cannot be opened to sync.
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let mut tmp = NamedTempFile::new_in(dir)?;
     tmp.write_all(data)?;
     tmp.as_file().sync_all()?;

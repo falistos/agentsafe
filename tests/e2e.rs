@@ -289,6 +289,16 @@ fn render_publishes_a_private_file_by_rename() {
     names.sort();
     assert!(names.is_empty(), "temporary files left: {names:?}");
 
+    // A bare file name lands in the current directory.
+    let out = home
+        .cmd(&["render", t, "--allow", "app", "-o", "bare.conf"])
+        .current_dir(home.dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(mode(&home.path("bare.conf")), 0o600);
+
     // No output, a missing parent, or a denied template: nothing is written.
     assert!(
         !home
