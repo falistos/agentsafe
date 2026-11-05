@@ -245,6 +245,67 @@ fn describe_flags_values_too_short_to_mask() {
 }
 
 #[test]
+fn render_refuses_an_allowed_entry_the_template_never_reads() {
+    let home = Home::new();
+    home.import_fixtures();
+    let template = home.path("t.j2");
+    // No `{{ }}`: the output would be the template text.
+    fs::write(&template, "DEPLOY_USER=secrets[\"db\"].DB_USER\n").unwrap();
+    let t = template.to_str().unwrap();
+    let existing = home.path("existing.env");
+    fs::write(&existing, "old\n").unwrap();
+    let created = home.path("created.env");
+    for target in [&existing, &created] {
+        let out = home.agentsafe(&["render", t, "--allow", "db", "-o", target.to_str().unwrap()]);
+        assert!(!out.status.success());
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("db"), "{stderr}");
+        assert!(stderr.contains("{{ secrets[\"NAME\"].KEY }}"), "{stderr}");
+        assert!(!stderr.contains("DEPLOY_USER"), "{stderr}");
+        assert!(!stderr.contains(DB_PASSWORD), "{stderr}");
+    }
+    assert_eq!(fs::read_to_string(&existing).unwrap(), "old\n");
+    assert!(!created.exists());
+}
+
+#[test]
+fn render_names_the_allowed_entry_that_the_template_leaves_unread() {
+    let home = Home::new();
+    home.import_fixtures();
+    let template = home.path("t.j2");
+    let target = home.path("out.conf");
+    let render = |source: &str| {
+        fs::write(&template, source).unwrap();
+        home.agentsafe(&[
+            "render",
+            template.to_str().unwrap(),
+            "--allow",
+            "app",
+            "--allow",
+            "db",
+            "-o",
+            target.to_str().unwrap(),
+        ])
+    };
+
+    let out = render("{{ secrets.app.API_TOKEN }}\n");
+    assert!(!out.status.success());
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("db") && !stderr.contains("app"), "{stderr}");
+    assert!(!stderr.contains(API_TOKEN), "{stderr}");
+    assert!(!target.exists());
+
+    // Listing the names reads no entry.
+    let out = render("{% for name in secrets %}{{ name }}{% endfor %}");
+    assert!(!out.status.success());
+    assert!(!target.exists());
+
+    let out = render("{{ secrets.app.API_TOKEN }}:{{ secrets[\"db\"].DB_USER }}\n");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(fs::read_to_string(&target).unwrap().starts_with(API_TOKEN));
+}
+
+#[test]
 fn render_publishes_a_private_file_by_rename() {
     let home = Home::new();
     home.import_fixtures();
@@ -1399,7 +1460,7 @@ fn set_with_lines_still_replaces_every_value() {
     );
     let out = home.agentsafe_stdin(&["set", "ovh"], "NEW_ONE=new-value-1\n");
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stderr), "stored ovh (1 keys)\n");
+    assert_eq!(text(&out.stderr), "stored ovh (1 key)\n");
     let described = text(&home.agentsafe(&["describe", "ovh"]).stdout);
     assert!(described.contains("keys: NEW_ONE\n"), "{described}");
 }
