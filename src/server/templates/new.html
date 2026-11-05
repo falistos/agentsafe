@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}New entry{% endblock %}
+{% block body %}
+<h1>New entry</h1>
+<form method="post" action="/new">
+<label for="name">Name</label>
+<input id="name" name="name" required autocomplete="off" placeholder="letters, digits, . _ -">
+<label for="values">Values (one KEY=VALUE per line)</label>
+<textarea id="values" name="values" required autocomplete="off" spellcheck="false"></textarea>
+{% include "meta_fields.html" %}
+<button>Create entry</button>
+</form>
+{% endblock %}

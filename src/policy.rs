@@ -76,6 +76,13 @@ pub struct Rights {
 }
 
 impl Rights {
+    /// Whether any grant holds `admin`, on whichever entries.
+    pub fn has_admin(&self) -> bool {
+        self.grants
+            .iter()
+            .any(|g| g.actions.contains(&Action::Admin))
+    }
+
     pub fn allows(&self, action: Action, name: &str) -> bool {
         self.grants.iter().any(|g| {
             g.actions.iter().any(|a| a.implies(action)) && g.entries.iter().any(|p| p.matches(name))

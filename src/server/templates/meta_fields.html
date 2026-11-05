@@ -1,0 +1,10 @@
+<label for="description">Description</label>
+<input id="description" name="description" value="{{ e.description }}">
+<label for="used_by">Used by (one per line)</label>
+<textarea class="short" id="used_by" name="used_by" rows="2">{{ e.used_by | join("\n") }}</textarea>
+<label for="owner">Owner</label>
+<input id="owner" name="owner" value="{{ e.owner }}">
+<label for="rotate_by">Rotate by (YYYY-MM-DD)</label>
+<input id="rotate_by" name="rotate_by" value="{{ e.rotate_by }}" placeholder="YYYY-MM-DD">
+<label for="tags">Tags (one per line)</label>
+<textarea class="short" id="tags" name="tags" rows="2">{{ e.tags | join("\n") }}</textarea>

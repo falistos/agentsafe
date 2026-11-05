@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block body %}
+<h1>Audit</h1>
+<p class="muted">The last {{ rows | length }} events, newest first.</p>
+<div class="scroll">
+<table>
+<tr><th>Time</th><th>Who</th><th>Via</th><th>Action</th><th>Entry</th><th>Result</th><th>Reason</th><th>Notify</th></tr>
+{% for r in rows %}
+<tr><td>{{ r.ts }}</td><td>{{ r.who }}</td><td>{{ r.via }}</td><td>{{ r.action }}</td><td>{{ r.entry }}</td><td>{{ r.result }}</td><td>{{ r.reason }}</td><td>{{ r.notify }}</td></tr>
+{% endfor %}
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} values{% endblock %}
+{% block body %}
+<h1>{{ name }}</h1>
+<p class="notice">These values are shown once.</p>
+<div class="scroll">
+<table>
+{% for v in values %}
+<tr><th>{{ v.key }}</th><td class="value">{{ v.value }}</td></tr>
+{% endfor %}
+</table>
+</div>
+<p><a href="/e/{{ name }}">Back to {{ name }}</a></p>
+{% endblock %}

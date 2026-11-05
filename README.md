@@ -49,6 +49,20 @@ logged, and a `run` whose key lookup or child fails after a successful fetch sta
 `--used-by` and `--tag`; an empty value clears the field (`--tag ''`). Values are never accepted
 as arguments.
 
+## Admin web UI
+
+`agentsafe serve` also serves a small admin UI at `/` (server-rendered HTML, no JavaScript) to
+callers with `admin` on at least one entry; it lists and acts only on the entries they have `admin`
+on. It shows an entry's metadata and key names, edits metadata, replaces values (write-only: the
+current values are never shown), creates entries, deletes them on a typed confirmation, and, for
+`admin` on `*`, shows the last 200 audit lines at `/audit`. "Reveal" shows an entry's values once
+and needs a reason of at least 4 characters; it is audited as `reveal` with that reason, and with
+`[serve] ntfy = "<URL>"` in the config the server also POSTs `<who> revealed <NAME>: <reason>` to
+that URL (never a value). If the notification fails the reveal still works and the audit line says
+`"notify": "failed"`. UI writes are audited like the API's, with `via: "ui"`. A non-GET request
+must carry `Sec-Fetch-Site: same-origin` or `none`, or, without that header, an `Origin` whose host
+is the `X-Forwarded-Host` that Serve sets.
+
 ## Masking
 
 `run` masks the values of the entries it injects and `scrub` those of every entry, replacing each

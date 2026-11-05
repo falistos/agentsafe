@@ -50,6 +50,8 @@ pub enum Selection {
 pub enum Refusal {
     NotFound(String),
     Invalid(String),
+    /// The entry is already there.
+    Conflict(String),
 }
 
 impl fmt::Display for Refusal {
@@ -57,6 +59,7 @@ impl fmt::Display for Refusal {
         match self {
             Refusal::NotFound(name) => write!(f, "no entry named {name}"),
             Refusal::Invalid(why) => f.write_str(why),
+            Refusal::Conflict(name) => write!(f, "{name} already exists"),
         }
     }
 }
@@ -118,6 +121,17 @@ impl MetaPatch {
         }
         Ok(())
     }
+}
+
+/// What a write requires of the entry, checked under the same lock as the write.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Expect {
+    /// Create the entry or change it.
+    Any,
+    /// The entry must already be there.
+    Exists,
+    /// The entry must not be there yet.
+    Absent,
 }
 
 /// New values and/or a metadata change. With no values the entry must already exist.
@@ -207,6 +221,18 @@ impl LocalBackend {
         outcome: Outcome,
         reason: Option<String>,
     ) -> Result<()> {
+        self.record_notified(caller, action, entry, outcome, reason, None)
+    }
+
+    fn record_notified(
+        &self,
+        caller: &Caller,
+        action: &str,
+        entry: Option<&str>,
+        outcome: Outcome,
+        reason: Option<String>,
+        notify: Option<&str>,
+    ) -> Result<()> {
         self.audit.append(&Event {
             who: caller.who.clone(),
             via: caller.via.into(),
@@ -214,7 +240,7 @@ impl LocalBackend {
             entry: entry.map(str::to_string),
             result: outcome,
             reason,
-            notify: None,
+            notify: notify.map(str::to_string),
         })
     }
 
@@ -239,10 +265,16 @@ impl LocalBackend {
         result
     }
 
-    fn apply_put(&self, name: &str, put: Put) -> Result<()> {
+    fn apply_put(&self, name: &str, put: Put, expect: Expect) -> Result<()> {
         validate_name(name).map_err(|e| Refusal::Invalid(e.to_string()))?;
         self.store.update(|vault| {
-            let entry = match (&put.values, vault.entries.contains_key(name)) {
+            let present = vault.entries.contains_key(name);
+            match expect {
+                Expect::Absent if present => return Err(Refusal::Conflict(name.into()).into()),
+                Expect::Exists if !present => return Err(Refusal::NotFound(name.into()).into()),
+                _ => {}
+            }
+            let entry = match (&put.values, present) {
                 (None, false) => return Err(Refusal::NotFound(name.into()).into()),
                 (Some(values), _) if values.is_empty() => {
                     return Err(Refusal::Invalid("no KEY=VALUE pairs given".into()).into());
@@ -330,9 +362,61 @@ impl LocalBackend {
             .collect())
     }
 
+    /// The values of one entry for the admin UI, audited as `reveal` with the reason. `notify`
+    /// takes the message for the owner and says whether it was delivered; it runs before the
+    /// audit line, which records the outcome and is written before any value is released.
+    pub fn reveal_as(
+        &self,
+        caller: &Caller,
+        name: &str,
+        reason: &str,
+        notify: Option<impl Fn(&str) -> bool>,
+    ) -> Result<Values> {
+        let mut vault = match self.store.load() {
+            Ok(vault) => vault,
+            Err(e) => {
+                let why = format!("{e:#}");
+                self.record(caller, "reveal", Some(name), Outcome::Error, Some(why))?;
+                return Err(e);
+            }
+        };
+        let Some(entry) = vault.entries.remove(name) else {
+            let why = format!("no entry named {name}");
+            self.record(caller, "reveal", Some(name), Outcome::Error, Some(why))?;
+            return Err(Refusal::NotFound(name.into()).into());
+        };
+        let notified = notify.map(|send| {
+            if send(&format!("{} revealed {name}: {reason}", caller.who)) {
+                "sent"
+            } else {
+                "failed"
+            }
+        });
+        self.record_notified(
+            caller,
+            "reveal",
+            Some(name),
+            Outcome::Ok,
+            Some(reason.to_string()),
+            notified,
+        )?;
+        Ok(entry.values)
+    }
+
     pub fn put_as(&self, caller: &Caller, name: &str, put: Put) -> Result<()> {
+        self.put_expecting(caller, name, put, Expect::Any)
+    }
+
+    /// `put_as`, refused as a conflict or a missing entry when `expect` does not hold.
+    pub fn put_expecting(
+        &self,
+        caller: &Caller,
+        name: &str,
+        put: Put,
+        expect: Expect,
+    ) -> Result<()> {
         let action = if put.values.is_some() { "put" } else { "edit" };
-        let result = self.apply_put(name, put);
+        let result = self.apply_put(name, put, expect);
         self.record_result(caller, action, name, result)
     }
 

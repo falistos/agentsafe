@@ -19,8 +19,7 @@ struct RawConfig {
 #[derive(Deserialize, Default)]
 pub struct Serve {
     pub socket: Option<String>,
-    /// Parsed now, read once the server notifies.
-    #[allow(dead_code)]
+    /// Where the admin UI posts a notification when it reveals values.
     pub ntfy: Option<String>,
 }
 
