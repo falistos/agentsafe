@@ -75,8 +75,8 @@ agentsafe scrub < app.env
 | `agentsafe init [--server URL]` | Creates the config and, without `--server`, an age identity and an empty vault. Never overwrites. |
 | `agentsafe list` | Entries with key count, owner, rotation date, tags, description. |
 | `agentsafe describe NAME` | One entry's metadata and key names, and which keys are too short to mask. |
-| `agentsafe set NAME [--key KEY]` | Stores values read from stdin: `KEY=VALUE` lines, or all of stdin (minus one trailing newline) as `KEY`. |
-| `agentsafe import FILE --name NAME` | Stores a `.env` file (`export`, quotes, comments; no `$VAR` expansion). |
+| `agentsafe set NAME [--key KEY]` | Stores values read from stdin: `KEY=VALUE` lines (keys `[A-Za-z0-9_.-]`; refused when no key has a value), or all of stdin (minus one trailing newline) as `KEY`. |
+| `agentsafe import FILE --name NAME` | Stores a `.env` file (`export`, quotes, comments; keys `[A-Za-z0-9_.-]`; no `$VAR` expansion; refused when no key has a value, as a lone padded base64 token). |
 | `agentsafe edit NAME` | Changes metadata only. Needs at least one metadata flag. |
 | `agentsafe rm NAME` | Deletes an entry. |
 | `agentsafe run --env NAME[:KEY[=VAR]] … -- CMD ARGS` | Runs `CMD` with the values in its environment, its stdout and stderr masked. Exits with the child's code. |

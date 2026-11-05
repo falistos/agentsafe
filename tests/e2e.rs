@@ -1128,6 +1128,102 @@ fn a_crlf_env_file_imports() {
     assert_eq!(text(&out.stdout), "win.env\twin\tOK\n");
 }
 
+/// Base64 tokens as a tunnel token file holds them: one line, `=` padding, no key.
+const PADDED_TOKENS: [&str; 2] = [
+    "eyJhIjoiZml4dHVyZS1hY2NvdW50IiwidCI6Ijk5In0=",
+    "c2VjcmV0LXRva2VuLWZpeHR1cmU==",
+];
+
+#[test]
+fn a_padded_base64_token_is_refused_by_import_and_set() {
+    for token in PADDED_TOKENS {
+        let home = Home::new();
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("tunnel.token");
+        fs::write(&file, format!("{token}\n")).unwrap();
+
+        let imported = home.agentsafe(&["import", file.to_str().unwrap(), "--name", "tunnel"]);
+        let set = home.agentsafe_stdin(&["set", "tunnel"], &format!("{token}\n"));
+        for out in [&imported, &set] {
+            assert!(!out.status.success());
+            let stderr = text(&out.stderr);
+            assert!(stderr.contains("set NAME --key KEY < FILE"), "{stderr}");
+            assert!(!stderr.contains(&token[..12]), "{stderr}");
+        }
+        assert_eq!(text(&home.agentsafe(&["list"]).stdout).lines().count(), 1);
+        let catalog = fs::read_to_string(home.path("catalog.toml")).unwrap_or_default();
+        assert!(!catalog.contains(&token[..12]), "{catalog}");
+    }
+}
+
+#[test]
+fn a_padded_base64_token_is_stored_by_set_with_a_key() {
+    for token in PADDED_TOKENS {
+        let home = Home::new();
+        let out = home.agentsafe_stdin(&["set", "tunnel", "--key", "TOKEN"], &format!("{token}\n"));
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let out = home
+            .cmd(&[
+                "run",
+                "--env",
+                "tunnel:TOKEN=T",
+                "--",
+                "sh",
+                "-c",
+                "test \"$T\" = \"$EXPECTED\" && echo same",
+            ])
+            .env("EXPECTED", token)
+            .output()
+            .unwrap();
+        assert_eq!(text(&out.stdout), "same\n", "{}", text(&out.stderr));
+    }
+}
+
+#[test]
+fn a_file_with_one_value_next_to_empty_keys_imports() {
+    let home = Home::new();
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("mixed.env");
+    fs::write(&file, "EMPTY=\nREAL=mixed-real-value-1\n").unwrap();
+    let out = home.agentsafe(&["import", file.to_str().unwrap(), "--name", "mixed"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&home.agentsafe(&["describe", "mixed"]).stdout).contains("keys: EMPTY, REAL\n"));
+}
+
+#[test]
+fn keys_with_a_dash_import_and_run_under_their_own_names() {
+    let home = Home::new();
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("bots.env");
+    fs::write(
+        &file,
+        "hadaria-prison=dash-key-value-1\nother-bot=dash-key-value-2\n",
+    )
+    .unwrap();
+    let out = home.agentsafe(&["import", file.to_str().unwrap(), "--name", "bots"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let out = home.agentsafe(&[
+        "run",
+        "--env",
+        "bots:hadaria-prison=T",
+        "--",
+        "sh",
+        "-c",
+        "test \"$T\" = dash-key-value-1 && echo same",
+    ]);
+    assert_eq!(text(&out.stdout), "same\n", "{}", text(&out.stderr));
+
+    // The shell cannot expand `$hadaria-prison`; `env` lists the variables under their own names.
+    let out = home.agentsafe(&["run", "--env", "bots", "--", "env"]);
+    let listed = text(&out.stdout);
+    assert!(listed.contains("hadaria-prison=***bots***\n"), "{listed}");
+    assert!(listed.contains("other-bot=***bots***\n"), "{listed}");
+
+    let out = home.agentsafe(&["verify-import", src.path().to_str().unwrap()]);
+    assert_eq!(text(&out.stdout), "bots.env\tbots\tOK\n");
+}
+
 /// JSON as Python's `json.dumps` writes it: non-ASCII as lower-case `\uXXXX`, astral characters
 /// as surrogate pairs.
 fn json_ascii(value: &str) -> String {

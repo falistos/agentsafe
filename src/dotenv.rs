@@ -6,6 +6,10 @@ use sha2::{Digest, Sha256};
 /// Parses `KEY=VALUE` lines: blank lines, `#` comments and an `export ` prefix are skipped;
 /// values may be single-quoted (literal), double-quoted (with `\n`, `\r`, `\t`, `\"`, `\\`
 /// escapes) or bare (ended by ` #`). Quoted values may span lines. No variable expansion.
+/// Keys are `[A-Za-z0-9_.-]` and do not start with a digit.
+///
+/// Input whose keys all lack a value (empty, or only `=` characters) is refused: a base64 token
+/// with `=` padding would otherwise be stored as a key name, which is public metadata.
 ///
 /// Errors carry a line number only, never the line, which may hold a value.
 pub fn parse(input: &str) -> Result<BTreeMap<String, String>> {
@@ -30,18 +34,19 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, String>> {
             p.skip_while(|c| c != '\n');
             continue;
         }
-        let mut key = p.take_while(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        let mut key = p.take_while(is_key_char);
         if key == "export" && p.peek().is_some_and(|c| c == ' ' || c == '\t') {
             p.skip_while(|c| c == ' ' || c == '\t');
-            key = p.take_while(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+            key = p.take_while(is_key_char);
         }
         if key.is_empty() || key.starts_with(|c: char| c.is_ascii_digit()) {
             bail!("line {}: invalid key", p.line);
         }
         p.skip_while(|c| c == ' ' || c == '\t');
-        if p.next() != Some('=') {
+        if p.peek() != Some('=') {
             bail!("line {}: expected KEY=VALUE", p.line);
         }
+        p.next();
         p.skip_while(|c| c == ' ' || c == '\t');
         let value = match p.peek() {
             Some(q @ ('\'' | '"')) => {
@@ -59,7 +64,17 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, String>> {
         };
         out.insert(key, value);
     }
+    if !out.is_empty() && out.values().all(|v| v.chars().all(|c| c == '=')) {
+        bail!(
+            "no key has a value; to store the whole input as one value, run \
+             `agentsafe set NAME --key KEY < FILE`"
+        );
+    }
     Ok(out)
+}
+
+fn is_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 
 /// SHA-256 over the sorted pairs, each field length-prefixed so that no two sets collide by
@@ -185,6 +200,42 @@ line" # after
         assert!(err.starts_with("line 2"), "{err}");
         assert!(!err.contains("secretvalue"));
         assert!(parse("A=\"open").is_err());
+        let err = parse("A=1\nleaked-looking-line\n").unwrap_err().to_string();
+        assert!(err.starts_with("line 2"), "{err}");
+    }
+
+    #[test]
+    fn input_without_a_value_is_refused_without_naming_it() {
+        for input in [
+            "dGhpc2lzYXNlY3JldHRva2Vu=\n",
+            "dGhpc2lzYXNlY3JldHRva2Vu==\n",
+            "A=\nB=\n",
+            "A=\"\"\n",
+            "A==\n",
+        ] {
+            let err = parse(input).unwrap_err().to_string();
+            assert!(err.contains("set NAME --key KEY < FILE"), "{err}");
+            assert!(!err.contains("dGhpc2"), "{err}");
+        }
+    }
+
+    #[test]
+    fn one_value_is_enough_and_empty_siblings_stay_valid() {
+        let m = parse("A=\nB=real\nC=\n").unwrap();
+        assert_eq!(m["A"], "");
+        assert_eq!(m["B"], "real");
+        assert_eq!(m["C"], "");
+        assert_eq!(parse("A=x=\n").unwrap()["A"], "x=");
+        assert!(parse("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn keys_accept_dashes_but_not_a_leading_digit() {
+        let m = parse("hadaria-prison=v\nexport a-b.c_d=w\n").unwrap();
+        assert_eq!(m["hadaria-prison"], "v");
+        assert_eq!(m["a-b.c_d"], "w");
+        assert!(parse("1-a=v").is_err());
+        assert!(parse("-a=v").is_ok());
     }
 
     #[test]
