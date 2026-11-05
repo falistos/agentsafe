@@ -207,6 +207,18 @@ impl LocalBackend {
         outcome: Outcome,
         reason: Option<String>,
     ) -> Result<()> {
+        self.record_notified(caller, action, entry, outcome, reason, None)
+    }
+
+    fn record_notified(
+        &self,
+        caller: &Caller,
+        action: &str,
+        entry: Option<&str>,
+        outcome: Outcome,
+        reason: Option<String>,
+        notify: Option<&str>,
+    ) -> Result<()> {
         self.audit.append(&Event {
             who: caller.who.clone(),
             via: caller.via.into(),
@@ -214,7 +226,7 @@ impl LocalBackend {
             entry: entry.map(str::to_string),
             result: outcome,
             reason,
-            notify: None,
+            notify: notify.map(str::to_string),
         })
     }
 
@@ -328,6 +340,47 @@ impl LocalBackend {
             .into_iter()
             .filter_map(|n| vault.entries.remove(&n).map(|e| (n, e.values)))
             .collect())
+    }
+
+    /// The values of one entry for the admin UI, audited as `reveal` with the reason. `notify`
+    /// takes the message for the owner and says whether it was delivered; it runs before the
+    /// audit line, which records the outcome and is written before any value is released.
+    pub fn reveal_as(
+        &self,
+        caller: &Caller,
+        name: &str,
+        reason: &str,
+        notify: Option<impl Fn(&str) -> bool>,
+    ) -> Result<Values> {
+        let mut vault = match self.store.load() {
+            Ok(vault) => vault,
+            Err(e) => {
+                let why = format!("{e:#}");
+                self.record(caller, "reveal", Some(name), Outcome::Error, Some(why))?;
+                return Err(e);
+            }
+        };
+        let Some(entry) = vault.entries.remove(name) else {
+            let why = format!("no entry named {name}");
+            self.record(caller, "reveal", Some(name), Outcome::Error, Some(why))?;
+            return Err(Refusal::NotFound(name.into()).into());
+        };
+        let notified = notify.map(|send| {
+            if send(&format!("{} revealed {name}: {reason}", caller.who)) {
+                "sent"
+            } else {
+                "failed"
+            }
+        });
+        self.record_notified(
+            caller,
+            "reveal",
+            Some(name),
+            Outcome::Ok,
+            Some(reason.to_string()),
+            notified,
+        )?;
+        Ok(entry.values)
     }
 
     pub fn put_as(&self, caller: &Caller, name: &str, put: Put) -> Result<()> {

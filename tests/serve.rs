@@ -812,3 +812,513 @@ fn sigterm_cuts_a_stalled_request_after_the_grace_period() {
     server.child = None;
     drop(conn);
 }
+
+// The admin web UI, through the same proxy.
+
+const FORWARDED_HOST: &str = "agentsafe.example.ts.net";
+const SAME_ORIGIN: [(&str, &str); 1] = [("Sec-Fetch-Site", "same-origin")];
+
+struct Reply {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl Reply {
+    fn header(&self, name: &str) -> &str {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map_or("", |(_, v)| v)
+    }
+}
+
+/// A browser's request to the UI: `form` is sent urlencoded unless it is a GET, and redirects
+/// are not followed.
+fn ui(
+    proxy: &Proxy,
+    method: &str,
+    path: &str,
+    form: &[(&str, &str)],
+    headers: &[(&str, &str)],
+) -> Reply {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .build()
+        .into();
+    let url = proxy.url(path);
+    let result = if method == "GET" {
+        let mut request = agent.get(&url);
+        for (k, v) in headers {
+            request = request.header(*k, *v);
+        }
+        request.call()
+    } else {
+        let mut request = agent.post(&url);
+        for (k, v) in headers {
+            request = request.header(*k, *v);
+        }
+        request.send_form(form.iter().copied())
+    };
+    let mut response = result.unwrap();
+    Reply {
+        status: response.status().as_u16(),
+        headers: response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap().to_string()))
+            .collect(),
+        body: response.body_mut().read_to_string().unwrap(),
+    }
+}
+
+fn get(proxy: &Proxy, path: &str) -> Reply {
+    ui(proxy, "GET", path, &[], &[])
+}
+
+fn post(proxy: &Proxy, path: &str, form: &[(&str, &str)]) -> Reply {
+    ui(proxy, "POST", path, form, &SAME_ORIGIN)
+}
+
+fn admin_of(entries: &str) -> String {
+    caps(&format!(
+        r#"{{"entries": [{entries}], "actions": ["admin"]}}"#
+    ))
+}
+
+impl Proxy {
+    /// The host `tailscale serve` forwards, which the UI compares with a request's `Origin`.
+    fn forwarded_host(&self, host: &str) {
+        self.headers
+            .lock()
+            .unwrap()
+            .push(("X-Forwarded-Host".into(), host.into()));
+    }
+}
+
+fn admin_proxy(server: &Server, entries: &str) -> Proxy {
+    let proxy = Proxy::start(&server.socket);
+    proxy.peer(Some(&admin_of(entries)), Some("alice@example.com"));
+    proxy.forwarded_host(FORWARDED_HOST);
+    proxy
+}
+
+#[test]
+fn the_ui_is_for_admins_and_shows_only_their_entries() {
+    let server = Server::start(Home::local());
+    let proxy = Proxy::start(&server.socket);
+
+    proxy.peer(
+        Some(&caps(r#"{"entries": ["*"], "actions": ["get", "put"]}"#)),
+        Some("bob@example.com"),
+    );
+    for path in ["/", "/new", "/audit", "/e/app"] {
+        let reply = get(&proxy, path);
+        assert_eq!(reply.status, 403, "{path}");
+        assert_no_value(&reply.body);
+    }
+    let denied: Vec<_> = server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["via"] == "ui")
+        .collect();
+    assert!(
+        denied
+            .iter()
+            .all(|l| l["result"] == "denied" && l["who"] == "bob@example.com"),
+        "{denied:?}"
+    );
+    assert_eq!(denied.len(), 4);
+
+    proxy.peer(Some(&admin_of(r#""db*""#)), Some("alice@example.com"));
+    let reply = get(&proxy, "/");
+    assert_eq!(reply.status, 200);
+    assert!(reply.body.contains(r#"href="/e/db""#), "{}", reply.body);
+    for other in ["app", "other"] {
+        assert!(!reply.body.contains(&format!("/e/{other}")), "{other}");
+    }
+    assert_eq!(reply.header("cache-control"), "no-store");
+    assert_eq!(reply.header("referrer-policy"), "no-referrer");
+    assert_eq!(
+        reply.header("content-security-policy"),
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+    );
+    assert_eq!(get(&proxy, "/e/db").status, 200);
+    assert_eq!(get(&proxy, "/e/app").status, 403);
+    assert_eq!(get(&proxy, "/e/nothing").status, 403);
+    assert_eq!(get(&proxy, "/audit").status, 403);
+    let page = get(&proxy, "/e/db");
+    assert!(page.body.contains("DB_PASSWORD"), "{}", page.body);
+    assert_no_value(&page.body);
+}
+
+#[test]
+fn entry_text_is_html_escaped() {
+    let server = Server::start(Home::local());
+    let hostile = r#"<script>alert(1)</script>" autofocus x=""#;
+    server.home.ok(&["edit", "db", "--description", hostile]);
+    server.home.ok(&["edit", "db", "--owner", "<b>owner</b>"]);
+    let proxy = admin_proxy(&server, r#""*""#);
+    for path in ["/", "/e/db"] {
+        let body = get(&proxy, path).body;
+        assert!(!body.contains("<script"), "{path}: {body}");
+        assert!(!body.contains("<b>owner"), "{path}");
+        assert!(
+            body.contains("&lt;script&gt;alert(1)&lt;"),
+            "{path}: {body}"
+        );
+    }
+    assert!(!get(&proxy, "/e/db").body.contains(r#"" autofocus"#));
+}
+
+#[test]
+fn non_get_ui_requests_need_a_same_origin_signal() {
+    let server = Server::start(Home::local());
+    let proxy = admin_proxy(&server, r#""*""#);
+    let edit = |owner: &str, headers: &[(&str, &str)]| {
+        let form = [("owner", owner)];
+        ui(&proxy, "POST", "/e/db/meta", &form, headers)
+    };
+
+    let refused: [&[(&str, &str)]; 5] = [
+        &[("Sec-Fetch-Site", "cross-site")],
+        &[("Sec-Fetch-Site", "same-site")],
+        &[("Origin", "https://evil.example")],
+        &[],
+        // A foreign Origin is not saved by a matching host elsewhere in the request.
+        &[
+            ("Origin", "https://evil.example"),
+            ("Referer", "https://agentsafe.example.ts.net/"),
+        ],
+    ];
+    for headers in refused {
+        let reply = edit("attacker", headers);
+        assert_eq!(reply.status, 403, "{headers:?}");
+        assert!(!reply.header("content-security-policy").is_empty());
+    }
+    // The refusal came before the write.
+    assert!(!server.home.ok(&["describe", "db"]).contains("owner:"));
+    let cross: Vec<_> = server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["reason"] == "cross-origin request")
+        .collect();
+    assert_eq!(cross.len(), refused.len());
+    assert_eq!(cross[0]["via"], "ui");
+    assert_eq!(cross[0]["result"], "denied");
+
+    let accepted: [(&[(&str, &str)], &str); 3] = [
+        (&[("Sec-Fetch-Site", "same-origin")], "one"),
+        (&[("Sec-Fetch-Site", "none")], "two"),
+        (&[("Origin", "https://agentsafe.example.ts.net")], "three"),
+    ];
+    for (headers, owner) in accepted {
+        let reply = edit(owner, headers);
+        assert_eq!(reply.status, 303, "{headers:?}");
+        assert_eq!(reply.header("location"), "/e/db?done=meta");
+        let described = server.home.ok(&["describe", "db"]);
+        assert!(
+            described.contains(&format!("owner: {owner}")),
+            "{described}"
+        );
+    }
+}
+
+#[test]
+fn values_replaced_in_the_ui_reach_a_remote_run() {
+    let server = Server::start(Home::local());
+    let proxy = admin_proxy(&server, r#""*""#);
+    let client = Home::remote(&proxy);
+    let fresh = "ui-replaced-value-8675309";
+
+    let reply = post(
+        &proxy,
+        "/e/app/values",
+        &[(
+            "values",
+            &format!("API_TOKEN={fresh}\r\nOTHER_KEY=short-but-long-enough\r\n"),
+        )],
+    );
+    assert_eq!(reply.status, 303, "{}", reply.body);
+    assert_eq!(reply.header("location"), "/e/app?done=values");
+    let script = format!("test \"$VAR\" = {fresh} && echo \"$VAR\" injected");
+    let out = client.ok(&[
+        "run",
+        "--env",
+        "app:API_TOKEN=VAR",
+        "--",
+        "sh",
+        "-c",
+        &script,
+    ]);
+    assert_eq!(out, "***app*** injected\n");
+    // Replaced, not merged: the old keys are gone.
+    assert!(!server.home.ok(&["describe", "app"]).contains("API_URL"));
+    // Nothing shows the values back.
+    let page = get(&proxy, "/e/app?done=values");
+    assert!(page.body.contains("Values replaced."));
+    assert!(!page.body.contains(fresh) && !page.body.contains(API_TOKEN));
+
+    // A line that is not KEY=VALUE is refused by number, without being quoted.
+    let reply = post(
+        &proxy,
+        "/e/app/values",
+        &[("values", "A=1\nleaked-looking-line-31337\n")],
+    );
+    assert_eq!(reply.status, 400);
+    assert!(reply.body.contains("line 2"), "{}", reply.body);
+    assert!(!reply.body.contains("leaked-looking-line-31337"));
+    // A name that does not exist is not created by this form.
+    assert_eq!(
+        post(&proxy, "/e/nothing/values", &[("values", "A=1")]).status,
+        404
+    );
+    assert!(!server.home.ok(&["list"]).contains("nothing"));
+
+    let puts: Vec<_> = server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["via"] == "ui" && l["action"] == "put")
+        .collect();
+    assert_eq!(puts.len(), 1, "{puts:?}");
+    assert_eq!(puts[0]["who"], "alice@example.com");
+    assert_eq!(puts[0]["entry"], "app");
+    let raw = fs::read_to_string(server.home.path("audit.jsonl")).unwrap();
+    assert!(!raw.contains(fresh));
+}
+
+#[test]
+fn new_entries_are_created_and_deleted_on_a_typed_confirmation() {
+    let server = Server::start(Home::local());
+    let proxy = admin_proxy(&server, r#""db*", "cloud""#);
+
+    let created = post(
+        &proxy,
+        "/new",
+        &[
+            ("name", "cloud"),
+            ("values", "TOKEN=ui-created-value-1618"),
+            ("description", "Made in the UI"),
+            ("tags", "a, b"),
+            ("rotate_by", "2020-01-01"),
+        ],
+    );
+    assert_eq!(created.status, 303, "{}", created.body);
+    assert_eq!(created.header("location"), "/e/cloud?done=created");
+    let described = server.home.ok(&["describe", "cloud"]);
+    assert!(described.contains("keys: TOKEN"), "{described}");
+    assert!(
+        described.contains("description: Made in the UI"),
+        "{described}"
+    );
+    let list = get(&proxy, "/").body;
+    assert!(list.contains(r#"class="overdue""#), "{list}");
+
+    let again = post(
+        &proxy,
+        "/new",
+        &[("name", "cloud"), ("values", "TOKEN=other-value-1")],
+    );
+    assert_eq!(again.status, 400);
+    assert!(again.body.contains("already exists"));
+    assert_eq!(
+        post(&proxy, "/new", &[("name", "bad name"), ("values", "A=1")]).status,
+        400
+    );
+    let outside = post(&proxy, "/new", &[("name", "github"), ("values", "A=1")]);
+    assert_eq!(outside.status, 403);
+    assert!(!server.home.ok(&["list"]).contains("github"));
+
+    let wrong = post(&proxy, "/e/cloud/delete", &[("confirm", "clou")]);
+    assert_eq!(wrong.status, 400);
+    assert!(server.home.ok(&["list"]).contains("cloud"));
+    assert_eq!(
+        post(&proxy, "/e/app/delete", &[("confirm", "app")]).status,
+        403
+    );
+    let deleted = post(&proxy, "/e/cloud/delete", &[("confirm", "cloud")]);
+    assert_eq!(deleted.status, 303);
+    assert_eq!(deleted.header("location"), "/?done=deleted");
+    assert!(!server.home.ok(&["list"]).contains("cloud"));
+    assert!(server.home.ok(&["list"]).contains("app"));
+}
+
+/// Reads one HTTP request per connection and answers 200; the raw requests are kept.
+fn fake_ntfy() -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/topic", listener.local_addr().unwrap());
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let shared = received.clone();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { break };
+            let mut raw = Vec::new();
+            let mut byte = [0u8];
+            while !raw.ends_with(b"\r\n\r\n") {
+                if conn.read(&mut byte).unwrap_or(0) == 0 {
+                    break;
+                }
+                raw.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse().unwrap());
+            let mut body = vec![0u8; length];
+            conn.read_exact(&mut body).unwrap();
+            raw.extend(body);
+            shared.lock().unwrap().push(text(&raw));
+            let _ = conn
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    });
+    (url, received)
+}
+
+/// A server whose config also sets `[serve].ntfy`.
+fn server_with_ntfy(url: Option<&str>) -> Server {
+    let home = Home::local();
+    if let Some(url) = url {
+        let mut config = fs::read_to_string(home.path("config.toml")).unwrap();
+        config.push_str(&format!("\n[serve]\nntfy = {url:?}\n"));
+        fs::write(home.path("config.toml"), config).unwrap();
+    }
+    Server::start(home)
+}
+
+fn reveal_lines(server: &Server) -> Vec<serde_json::Value> {
+    server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["action"] == "reveal")
+        .collect()
+}
+
+#[test]
+fn reveal_needs_a_reason_audits_it_and_notifies_without_the_value() {
+    let (url, received) = fake_ntfy();
+    let server = server_with_ntfy(Some(&url));
+    let proxy = admin_proxy(&server, r#""*""#);
+
+    for reason in ["", "   ", "a b c", "  ab  "] {
+        let reply = post(&proxy, "/e/app/reveal", &[("reason", reason)]);
+        assert_eq!(reply.status, 400, "{reason:?}");
+        assert_no_value(&reply.body);
+    }
+    assert!(reveal_lines(&server).is_empty());
+    assert!(received.lock().unwrap().is_empty());
+    // Nobody reveals what they cannot administer.
+    proxy.peer(Some(&admin_of(r#""db*""#)), Some("bob@example.com"));
+    assert_eq!(
+        post(&proxy, "/e/app/reveal", &[("reason", "looking around")]).status,
+        403
+    );
+    assert_eq!(reveal_lines(&server).len(), 1);
+    assert_eq!(reveal_lines(&server)[0]["result"], "denied");
+    proxy.peer(Some(&admin_of(r#""*""#)), Some("alice@example.com"));
+    proxy.forwarded_host(FORWARDED_HOST);
+
+    let reply = post(
+        &proxy,
+        "/e/app/reveal",
+        &[("reason", "rotating the api key")],
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.header("cache-control"), "no-store");
+    assert!(reply.body.contains(API_TOKEN), "{}", reply.body);
+    assert!(reply.body.contains("API_TOKEN"));
+
+    let lines = reveal_lines(&server);
+    let line = lines.last().unwrap();
+    assert_eq!(line["who"], "alice@example.com");
+    assert_eq!(line["via"], "ui");
+    assert_eq!(line["entry"], "app");
+    assert_eq!(line["result"], "ok");
+    assert_eq!(line["reason"], "rotating the api key");
+    assert_eq!(line["notify"], "sent");
+    let raw = fs::read_to_string(server.home.path("audit.jsonl")).unwrap();
+    assert_no_value(&raw);
+
+    let sent = received.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("POST /topic "), "{}", sent[0]);
+    assert!(
+        sent[0]
+            .to_ascii_lowercase()
+            .contains("title: agentsafe reveal")
+    );
+    assert!(sent[0].ends_with("alice@example.com revealed app: rotating the api key"));
+    assert_no_value(&sent[0]);
+    assert!(!sent[0].contains("fixture"));
+}
+
+#[test]
+fn reveal_works_when_ntfy_is_down_or_not_configured() {
+    // A port that nothing listens on.
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}/topic", listener.local_addr().unwrap())
+    };
+    for (ntfy, notify) in [(Some(closed.as_str()), Some("failed")), (None, None)] {
+        let server = server_with_ntfy(ntfy);
+        let proxy = admin_proxy(&server, r#""*""#);
+        let reply = post(
+            &proxy,
+            "/e/other/reveal",
+            &[("reason", "checking the value")],
+        );
+        assert_eq!(reply.status, 200, "{ntfy:?}: {}", reply.body);
+        assert!(reply.body.contains(OTHER_VALUE));
+        let lines = reveal_lines(&server);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["result"], "ok");
+        assert_eq!(lines[0]["reason"], "checking the value");
+        assert_eq!(lines[0].get("notify").and_then(|n| n.as_str()), notify);
+    }
+}
+
+#[test]
+fn the_audit_page_is_for_admins_of_everything_and_lists_newest_first() {
+    let server = server_with_ntfy(None);
+    let proxy = admin_proxy(&server, r#""*""#);
+    post(&proxy, "/e/app/reveal", &[("reason", "first reason given")]);
+    post(
+        &proxy,
+        "/e/other/reveal",
+        &[("reason", "second reason given")],
+    );
+
+    let page = get(&proxy, "/audit");
+    assert_eq!(page.status, 200);
+    let first = page.body.find("first reason given").unwrap();
+    let second = page.body.find("second reason given").unwrap();
+    assert!(second < first, "newest first");
+    assert!(page.body.contains("alice@example.com"));
+    assert_no_value(&page.body);
+    assert!(get(&proxy, "/").body.contains(r#"href="/audit""#));
+
+    proxy.peer(Some(&admin_of(r#""db*""#)), Some("bob@example.com"));
+    let refused = get(&proxy, "/audit");
+    assert_eq!(refused.status, 403);
+    assert!(!refused.body.contains("first reason given"));
+    assert!(!get(&proxy, "/").body.contains(r#"href="/audit""#));
+
+    // Only the last 200 lines are shown.
+    for i in 0..210 {
+        server.home.ok_stdin(
+            &["set", &format!("bulk{i}"), "--key", "K"],
+            "bulk-value-123456\n",
+        );
+    }
+    proxy.peer(Some(&admin_of(r#""*""#)), Some("alice@example.com"));
+    let page = get(&proxy, "/audit").body;
+    assert_eq!(page.matches("<tr><td>").count(), 200);
+    assert!(page.contains("bulk209") && !page.contains("first reason given"));
+}

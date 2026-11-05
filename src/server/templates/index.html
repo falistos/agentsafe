@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Entries{% endblock %}
+{% block body %}
+<h1>Entries</h1>
+{% if entries %}
+<div class="scroll">
+<table>
+<tr><th>Name</th><th>Description</th><th>Keys</th><th>Owner</th><th>Rotate by</th><th>Tags</th></tr>
+{% for e in entries %}
+<tr>
+<td><a href="/e/{{ e.name }}">{{ e.name }}</a></td>
+<td>{{ e.description }}</td>
+<td>{{ e.keys | length }}</td>
+<td>{{ e.owner }}</td>
+<td{% if e.overdue %} class="overdue"{% endif %}>{{ e.rotate_by }}</td>
+<td>{{ e.tags }}</td>
+</tr>
+{% endfor %}
+</table>
+</div>
+{% else %}
+<p class="muted">No entries yet.</p>
+{% endif %}
+{% endblock %}

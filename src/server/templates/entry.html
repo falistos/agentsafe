@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}{{ e.name }}{% endblock %}
+{% block body %}
+<h1>{{ e.name }}</h1>
+<p class="muted">Keys:
+{% for k in e.keys %}<code>{{ k }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+{% if e.unmasked %}<br>Too short to be masked: {% for k in e.unmasked %}<code>{{ k }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
+{% if e.overdue %}<br><span class="overdue">Rotation was due {{ e.rotate_by }}.</span>{% endif %}
+</p>
+
+<h2>Metadata</h2>
+<form method="post" action="/e/{{ e.name }}/meta">
+{% include "meta_fields.html" %}
+<button>Save metadata</button>
+</form>
+
+<h2>Replace values</h2>
+<p class="muted">One <code>KEY=VALUE</code> per line. The new values replace all current ones; current values are never shown here.</p>
+<form method="post" action="/e/{{ e.name }}/values">
+<label for="values">Values</label>
+<textarea id="values" name="values" required autocomplete="off" spellcheck="false"></textarea>
+<button>Replace values</button>
+</form>
+
+<h2>Reveal</h2>
+<p class="muted">Shows the values once. The reveal is audited with your reason{% if ntfy %} and the owner is notified{% endif %}.</p>
+<form method="post" action="/e/{{ e.name }}/reveal">
+<label for="reason">Reason (at least 4 characters)</label>
+<input id="reason" name="reason" required autocomplete="off">
+<button>Reveal values</button>
+</form>
+
+<h2>Delete</h2>
+<form method="post" action="/e/{{ e.name }}/delete">
+<label for="confirm">Type <code>{{ e.name }}</code> to confirm</label>
+<input id="confirm" name="confirm" required autocomplete="off">
+<button class="danger">Delete entry</button>
+</form>
+{% endblock %}

@@ -41,6 +41,10 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct AppState {
     backend: Arc<LocalBackend>,
+    /// `audit.jsonl`, which the admin UI reads.
+    audit: Arc<Path>,
+    /// Where the UI posts a notification when it reveals values.
+    ntfy: Option<Arc<str>>,
 }
 
 /// The authenticated request, set by [`authorize`] for the handlers.
@@ -62,6 +66,7 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
         );
     };
     let socket = socket_path(socket, &config.serve, &dir);
+    let ntfy = config.serve.ntfy.as_deref().map(Arc::from);
     let backend = Arc::new(LocalBackend::new(
         Store::new(&dir, identity, recipients),
         &dir,
@@ -78,7 +83,7 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
         let listener = bind(&socket)?;
         eprintln!("agentsafe: serving on {}", socket.display());
         let (stop, stopped) = oneshot::channel::<()>();
-        let server = axum::serve(listener, app(backend)).with_graceful_shutdown(async {
+        let server = axum::serve(listener, app(backend, &dir, ntfy)).with_graceful_shutdown(async {
             let _ = stopped.await;
         });
         let mut server = pin!(server.into_future());
@@ -181,8 +186,12 @@ async fn shutdown(mut term: Signal, mut int: Signal) {
     .await;
 }
 
-fn app(backend: Arc<LocalBackend>) -> Router {
-    let state = AppState { backend };
+fn app(backend: Arc<LocalBackend>, dir: &Path, ntfy: Option<Arc<str>>) -> Router {
+    let state = AppState {
+        backend,
+        audit: dir.join("audit.jsonl").into(),
+        ntfy,
+    };
     Router::new()
         .route("/api/v1/entries", get(list))
         .route(
@@ -190,7 +199,7 @@ fn app(backend: Arc<LocalBackend>) -> Router {
             get(describe).put(put).delete(remove),
         )
         .route("/api/v1/fetch", post(fetch))
-        .merge(ui::router())
+        .merge(ui::router(state.clone()))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
@@ -199,7 +208,7 @@ fn app(backend: Arc<LocalBackend>) -> Router {
 /// Runs on every request, matched or not: rights from the Serve headers, then the CSRF header.
 async fn authorize(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let headers = req.headers();
-    let caller = caller(headers);
+    let caller = caller(headers, req.uri().path());
     let (rights, warnings) = policy::parse(
         headers
             .get("tailscale-app-capabilities")
@@ -236,8 +245,9 @@ async fn authorize(State(state): State<AppState>, mut req: Request, next: Next) 
     response
 }
 
-/// `Tailscale-User-Login` for user nodes, else the source address of a tagged node.
-fn caller(headers: &HeaderMap) -> Caller {
+/// `Tailscale-User-Login` for user nodes, else the source address of a tagged node. Requests
+/// outside `/api/` come from the admin UI.
+fn caller(headers: &HeaderMap, path: &str) -> Caller {
     let header = |name: &str| {
         headers
             .get(name)
@@ -249,7 +259,12 @@ fn caller(headers: &HeaderMap) -> Caller {
         (None, Some(addr)) => format!("node:{addr}"),
         (None, None) => "unknown".into(),
     };
-    Caller { who, via: "api" }
+    let via = if path.starts_with("/api/") {
+        "api"
+    } else {
+        "ui"
+    };
+    Caller { who, via }
 }
 
 /// The audited action of a request refused before its handler ran.
