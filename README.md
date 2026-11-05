@@ -32,12 +32,18 @@
 
 ## Install
 
-Once a release is published, the [releases page](https://github.com/falistos/agentsafe/releases) has archives for
-Linux (`x86_64` and `aarch64`, musl) and macOS (`aarch64`) with a `SHA256SUMS` file. Until then, with Rust 1.89+:
+Download a binary for Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static) or macOS
+(`aarch64-apple-darwin`) from the [latest release](https://github.com/falistos/agentsafe/releases/latest) and check
+it against `SHA256SUMS`:
 
 ```sh
-cargo install --locked --git https://github.com/falistos/agentsafe
+target=aarch64-apple-darwin
+curl -LO https://github.com/falistos/agentsafe/releases/latest/download/agentsafe-v0.1.0-$target.tar.gz
+curl -LO https://github.com/falistos/agentsafe/releases/latest/download/SHA256SUMS
+shasum -a 256 -c SHA256SUMS --ignore-missing && tar -xzf agentsafe-v0.1.0-$target.tar.gz
 ```
+
+Or build it with Rust 1.89+: `cargo install --locked --git https://github.com/falistos/agentsafe`.
 
 ## Quick start
 
