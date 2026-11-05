@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "a fixture or setup step that fails must panic the test, as unwrap does"
+)]
+
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -27,10 +32,6 @@ struct Home {
     config: Option<PathBuf>,
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 impl Home {
     fn new() -> Home {
         let dir = tempfile::tempdir().unwrap();
@@ -109,10 +110,6 @@ impl Home {
 }
 
 /// An empty vault encrypted to `identity`, as `init` leaves it.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn write_empty_vault(dir: &Path, identity: &age::x25519::Identity) {
     let recipient = identity.to_public();
     let recipient: &dyn age::Recipient = &recipient;
@@ -379,18 +376,10 @@ fn scrub_masks_long_values_in_bounded_time() {
     }
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn cli(config: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_agentsafe"))
         .args(args)
@@ -907,10 +896,6 @@ fn concurrent_sets_lose_no_entry() {
 }
 
 /// The exit status, or `None` (and the child killed) if it still runs after `limit`.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn wait_at_most(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + limit;
     loop {

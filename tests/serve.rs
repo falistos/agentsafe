@@ -1,5 +1,10 @@
 //! `agentsafe serve` behind a stand-in for `tailscale serve`, and the CLI in remote mode.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "a fixture or setup step that fails must panic the test, as unwrap does"
+)]
+
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -24,10 +29,6 @@ const CAP: &str = "github.com/falistos/agentsafe/cap/agentsafe";
 const PEER: &str = "100.101.102.103";
 
 /// An empty vault encrypted to `identity`, as `init` leaves it.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn write_empty_vault(dir: &Path, identity: &age::x25519::Identity) {
     let recipient = identity.to_public();
     let recipient: &dyn age::Recipient = &recipient;
@@ -61,10 +62,6 @@ struct Home {
     dir: TempDir,
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 impl Home {
     fn local() -> Home {
         let dir = tempfile::tempdir().unwrap();
@@ -161,10 +158,6 @@ struct Server {
     child: Option<Child>,
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 impl Server {
     fn start(home: Home) -> Server {
         let socket = home.path("agentsafe.sock");
@@ -200,10 +193,6 @@ impl Server {
     }
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn terminate(child: &Child) {
     let killed = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
@@ -213,10 +202,6 @@ fn terminate(child: &Child) {
 }
 
 /// The exit status, or `None` if the child still runs after `limit`.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn wait_at_most(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + limit;
     loop {
@@ -259,10 +244,6 @@ struct Proxy {
     headers: Arc<Mutex<Vec<(String, String)>>>,
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 impl Proxy {
     fn start(socket: &Path) -> Proxy {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -298,10 +279,6 @@ impl Proxy {
     }
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn forward(mut client: TcpStream, socket: &Path, injected: &[(String, String)]) {
     let mut head = Vec::new();
     let mut byte = [0u8];
@@ -360,10 +337,6 @@ fn api_without_csrf(proxy: &Proxy, method: &str, path: &str, body: Option<&str>)
     send_api(proxy, method, path, body, "0")
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn send_api(
     proxy: &Proxy,
     method: &str,
@@ -908,10 +881,6 @@ impl Reply {
 
 /// A browser's request to the UI: `form` is sent urlencoded unless it is a GET, and redirects
 /// are not followed.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn ui(
     proxy: &Proxy,
     method: &str,
@@ -965,10 +934,6 @@ fn admin_of(entries: &str) -> String {
     ))
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 impl Proxy {
     /// The host `tailscale serve` forwards, which the UI compares with a request's `Origin`.
     fn forwarded_host(&self, host: &str) {
@@ -1234,10 +1199,6 @@ fn new_entries_are_created_and_deleted_on_a_typed_confirmation() {
 }
 
 /// Reads one HTTP request per connection and answers 200; the raw requests are kept.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn fake_ntfy() -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/topic", listener.local_addr().unwrap());
@@ -1271,10 +1232,6 @@ fn fake_ntfy() -> (String, Arc<Mutex<Vec<String>>>) {
 }
 
 /// A server whose config also sets `[serve].ntfy`.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn server_with_ntfy(url: Option<&str>) -> Server {
     let home = Home::local();
     if let Some(url) = url {
@@ -1417,10 +1374,6 @@ fn the_audit_page_is_for_admins_of_everything_and_lists_newest_first() {
 }
 
 /// The value of a form field as the page renders it, input or textarea.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure panics the calling test"
-)]
 fn field(body: &str, name: &str) -> String {
     let at = body.find(&format!(r#"name="{name}""#)).unwrap();
     let tag = &body[body[..at].rfind('<').unwrap()..];
