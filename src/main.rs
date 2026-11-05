@@ -466,7 +466,15 @@ fn verify_import(backend: &dyn Backend, dir: &Path) -> Result<ExitCode> {
             all_ok = false;
             continue;
         };
-        let text = Zeroizing::new(fs::read_to_string(&path).unwrap_or_default());
+        // Only the error kind is printed: an error message could quote file content.
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => Zeroizing::new(text),
+            Err(e) => {
+                println!("{file_name}\t{name}\tUNREADABLE ({})", e.kind());
+                all_ok = false;
+                continue;
+            }
+        };
         let same = dotenv::parse(&text).is_ok_and(|parsed| {
             dotenv::fingerprint(parsed.iter().map(|(k, v)| (k.as_str(), v.as_str())))
                 == dotenv::fingerprint(values.iter().map(|(k, v)| (k.as_str(), v.expose_secret())))

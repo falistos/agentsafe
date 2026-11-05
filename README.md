@@ -76,7 +76,7 @@ agentsafe scrub < app.env
 | `agentsafe run --env NAME[:KEY[=VAR]] … -- CMD ARGS` | Runs `CMD` with the values in its environment, its stdout and stderr masked. Exits with the child's code. |
 | `agentsafe render TEMPLATE --allow NAME … -o FILE` | Renders a minijinja template where `secrets["NAME"].KEY` reads allowed entries into a new 0600 file that replaces `FILE` atomically. |
 | `agentsafe scrub` | Copies stdin to stdout with the values masked. |
-| `agentsafe verify-import DIR` | Compares each file of `DIR` with the entry imported from it by SHA-256 fingerprint: `OK`, `MISMATCH` or `NOT IMPORTED`; exits 1 unless all are `OK`. |
+| `agentsafe verify-import DIR` | Compares each file of `DIR` with the entry imported from it by SHA-256 fingerprint: `OK`, `MISMATCH`, `UNREADABLE` (with the error kind) or `NOT IMPORTED`; exits 1 unless all are `OK`. |
 | `agentsafe serve [--socket PATH]` | Serves the local vault over HTTP on a Unix socket for `tailscale serve`. |
 
 `set`, `import` and `edit` take `--description`, `--owner`, `--rotate-by YYYY-MM-DD`, and repeatable `--used-by`
