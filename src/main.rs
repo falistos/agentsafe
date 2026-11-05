@@ -1,4 +1,8 @@
+mod audit;
+mod backend;
+mod config;
 mod dotenv;
+mod init;
 mod mask;
 mod vault;
 
@@ -16,19 +20,21 @@ use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use jiff::civil::Date;
 use minijinja::syntax::SyntaxConfig;
 use minijinja::{Environment, UndefinedBehavior};
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
+use crate::backend::{
+    Backend, LocalBackend, MetaPatch, Purpose, Put, Selection, Values, masker, short_keys,
+};
+use crate::config::{Config, Mode};
 use crate::mask::{MIN_LEN, Masker};
-use crate::vault::{Entry, Store, Vault, validate_name};
+use crate::vault::Store;
 
 /// Secrets for AI agents: values go into child processes and files, never to the caller's output.
 ///
-/// Configuration: `$SAFE_CONFIG` or `~/.config/safe/config.toml`, with `identity = "<age identity
-/// file>"` and optional `recipients = ["age1…"]`. `vault.age` and `catalog.toml` sit next to it.
+/// Config: `$AGENTSAFE_CONFIG` or `~/.config/agentsafe/config.toml`; `agentsafe init` creates it.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -38,6 +44,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Create the config and a new age identity (or a remote config with --server).
+    Init {
+        /// Write a remote config pointing at this server URL; no identity is created.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
     /// List entries with their metadata.
     List,
     /// Show one entry's metadata and key names, never its values.
@@ -52,29 +64,31 @@ enum Cmd {
         meta: MetaArgs,
     },
     /// Create or replace an entry from a .env file.
-    ImportEnv {
+    Import {
         file: PathBuf,
+        /// Name of the entry to store the file's pairs in.
         #[arg(long)]
         name: String,
         #[command(flatten)]
         meta: MetaArgs,
     },
+    /// Change an entry's metadata; its values are untouched.
+    Edit {
+        name: String,
+        #[command(flatten)]
+        meta: MetaArgs,
+    },
+    /// Delete an entry.
+    Rm { name: String },
     /// Run a command with entries in its environment and its output masked.
-    ///
-    /// `--env NAME` injects every key of the entry under its own name; `NAME:KEY` injects one key,
-    /// `NAME:KEY=VAR` injects it as VAR. The child's stdout and stderr are pipes, even from a
-    /// terminal, and every known value is replaced with ***NAME*** in them, also when base64,
-    /// hex, JSON- or URL-encoded. Not masked: values under 6 bytes, hashed, encrypted, reversed or
-    /// otherwise transformed output, and anything the child writes to files or the network.
     Run {
+        /// Entry to inject: NAME (all keys), NAME:KEY, or NAME:KEY=VAR; repeat for several.
         #[arg(long = "env", required = true, value_name = "NAME[:KEY[=VAR]]")]
         env: Vec<EnvSpec>,
         #[arg(last = true, required = true)]
         command: Vec<OsString>,
     },
-    /// Render a minijinja template to stdout, which must be redirected to a file (made 0600).
-    ///
-    /// Allowed entries are exposed as `safe["NAME"].KEY`.
+    /// Render a template (`secrets["NAME"].KEY`) to stdout, which must be redirected to a file.
     Render {
         template: PathBuf,
         /// Entry the template may read; repeat for several.
@@ -87,21 +101,41 @@ enum Cmd {
     VerifyImport { dir: PathBuf },
 }
 
+/// An empty value clears the field.
 #[derive(Args)]
 struct MetaArgs {
+    /// What the entry is for; empty clears.
     #[arg(long)]
     description: Option<String>,
-    /// Where the entry is used; repeat for several.
+    /// Where the entry is used; repeat for several, empty clears.
     #[arg(long)]
     used_by: Vec<String>,
+    /// Who owns the entry; empty clears.
     #[arg(long)]
     owner: Option<String>,
-    /// Date the values must be rotated by (YYYY-MM-DD).
+    /// Date the values must be rotated by (YYYY-MM-DD); empty clears.
     #[arg(long)]
-    rotate_by: Option<Date>,
-    /// Repeat for several.
+    rotate_by: Option<String>,
+    /// Free-form label; repeat for several, empty clears.
     #[arg(long = "tag")]
     tags: Vec<String>,
+}
+
+impl MetaArgs {
+    fn into_patch(self, source: Option<String>) -> MetaPatch {
+        // Repeatable flags: none given leaves the field alone, empty values only clear it.
+        let list = |v: Vec<String>| {
+            (!v.is_empty()).then(|| v.into_iter().filter(|s| !s.is_empty()).collect())
+        };
+        MetaPatch {
+            description: self.description,
+            used_by: list(self.used_by),
+            owner: self.owner,
+            rotate_by: self.rotate_by,
+            tags: list(self.tags),
+            source,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -138,17 +172,34 @@ fn main() -> ExitCode {
     match run(Cli::parse().cmd) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("safe: {e:#}");
+            eprintln!("agentsafe: {e:#}");
             ExitCode::FAILURE
         }
     }
 }
 
 fn run(cmd: Cmd) -> Result<ExitCode> {
-    let store = Store::open()?;
+    if let Cmd::Init { server } = cmd {
+        init::init(server)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let config = Config::load()?;
+    let dir = config.dir().to_path_buf();
+    let backend = match config.mode {
+        Mode::Local {
+            identity,
+            recipients,
+        } => LocalBackend::new(Store::new(&dir, identity, recipients), &dir),
+        Mode::Remote { ref server } => bail!(
+            "remote mode is not available yet (server = {server:?} in {})",
+            config.path.display()
+        ),
+    };
+    let backend: &dyn Backend = &backend;
     match cmd {
-        Cmd::List => list(&store)?,
-        Cmd::Describe { name } => describe(&store, &name)?,
+        Cmd::Init { .. } => unreachable!("handled above"),
+        Cmd::List => list(backend)?,
+        Cmd::Describe { name } => describe(backend, &name)?,
         Cmd::Set { name, key, meta } => {
             let mut input = Zeroizing::new(String::new());
             io::stdin()
@@ -161,32 +212,52 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
                 }
                 None => dotenv::parse(&input).context("stdin")?,
             };
-            store_entry(&store, &name, values, meta, None)?;
+            store_entry(backend, &name, values, meta, None)?;
         }
-        Cmd::ImportEnv { file, name, meta } => {
+        Cmd::Import { file, name, meta } => {
             let text = Zeroizing::new(
                 fs::read_to_string(&file)
                     .with_context(|| format!("cannot read {}", file.display()))?,
             );
             let values = dotenv::parse(&text).with_context(|| file.display().to_string())?;
             let source = file.canonicalize()?.to_string_lossy().into_owned();
-            store_entry(&store, &name, values, meta, Some(source))?;
+            store_entry(backend, &name, values, meta, Some(source))?;
         }
-        Cmd::Run { env, command } => return run_child(&store, &env, &command),
-        Cmd::Render { template, allow } => render(&store, &template, &allow)?,
-        Cmd::Scrub => store
-            .load()?
-            .masker()
-            .copy(io::stdin().lock(), io::stdout().lock())?,
-        Cmd::VerifyImport { dir } => return verify_import(&store, &dir),
+        Cmd::Edit { name, meta } => {
+            let patch = meta.into_patch(None);
+            if patch.is_empty() {
+                bail!(
+                    "nothing to change: pass --description, --used-by, --owner, --rotate-by or --tag"
+                );
+            }
+            backend.put(
+                &name,
+                Put {
+                    values: None,
+                    meta: patch,
+                },
+            )?;
+            eprintln!("edited {name}");
+        }
+        Cmd::Rm { name } => {
+            backend.remove(&name)?;
+            eprintln!("removed {name}");
+        }
+        Cmd::Run { env, command } => return run_child(backend, &env, &command),
+        Cmd::Render { template, allow } => render(backend, &template, allow)?,
+        Cmd::Scrub => {
+            let fetched = backend.fetch(Purpose::Scrub, &Selection::All)?;
+            masker(&fetched).copy(io::stdin().lock(), io::stdout().lock())?;
+        }
+        Cmd::VerifyImport { dir } => return verify_import(backend, &dir),
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn list(store: &Store) -> Result<()> {
+fn list(backend: &dyn Backend) -> Result<()> {
     let dash = |s: Option<String>| s.filter(|s| !s.is_empty()).unwrap_or("-".into());
     println!("NAME\tKEYS\tOWNER\tROTATE_BY\tTAGS\tDESCRIPTION");
-    for (name, e) in store.catalog()? {
+    for (name, e) in backend.catalog()? {
         println!(
             "{name}\t{}\t{}\t{}\t{}\t{}",
             e.keys.len(),
@@ -199,8 +270,8 @@ fn list(store: &Store) -> Result<()> {
     Ok(())
 }
 
-fn describe(store: &Store, name: &str) -> Result<()> {
-    let mut catalog = store.catalog()?;
+fn describe(backend: &dyn Backend, name: &str) -> Result<()> {
+    let mut catalog = backend.catalog()?;
     let e = catalog
         .remove(name)
         .ok_or_else(|| anyhow!("no entry named {name}"))?;
@@ -229,26 +300,17 @@ fn describe(store: &Store, name: &str) -> Result<()> {
 }
 
 fn store_entry(
-    store: &Store,
+    backend: &dyn Backend,
     name: &str,
     values: BTreeMap<String, String>,
     meta: MetaArgs,
     source: Option<String>,
 ) -> Result<()> {
-    validate_name(name)?;
-    if values.is_empty() {
-        bail!("no KEY=VALUE pairs given");
-    }
-    let mut vault = store.load()?;
-    let entry = vault
-        .entries
-        .entry(name.to_string())
-        .or_insert_with(Entry::default);
-    let short: Vec<&str> = values
-        .iter()
-        .filter(|(_, v)| v.len() < MIN_LEN)
-        .map(|(k, _)| k.as_str())
+    let values: Values = values
+        .into_iter()
+        .map(|(k, v)| (k, SecretString::from(v)))
         .collect();
+    let short = short_keys(&values);
     if !short.is_empty() {
         eprintln!(
             "warning: {} under {MIN_LEN} bytes, will not be masked",
@@ -256,58 +318,41 @@ fn store_entry(
         );
     }
     let count = values.len();
-    entry.values = values
-        .into_iter()
-        .map(|(k, v)| (k, SecretString::from(v)))
-        .collect();
-    let m = &mut entry.meta;
-    if meta.description.is_some() {
-        m.description = meta.description;
-    }
-    if !meta.used_by.is_empty() {
-        m.used_by = meta.used_by;
-    }
-    if meta.owner.is_some() {
-        m.owner = meta.owner;
-    }
-    if meta.rotate_by.is_some() {
-        m.rotate_by = meta.rotate_by;
-    }
-    if !meta.tags.is_empty() {
-        m.tags = meta.tags;
-    }
-    if source.is_some() {
-        m.source = source;
-    }
-    store.save(&vault)?;
+    backend.put(
+        name,
+        Put {
+            values: Some(values),
+            meta: meta.into_patch(source),
+        },
+    )?;
     eprintln!("stored {name} ({count} keys)");
     Ok(())
 }
 
-fn run_child(store: &Store, specs: &[EnvSpec], command: &[OsString]) -> Result<ExitCode> {
-    let vault = store.load()?;
+fn run_child(backend: &dyn Backend, specs: &[EnvSpec], command: &[OsString]) -> Result<ExitCode> {
+    let names = specs.iter().map(|s| s.name.clone()).collect();
+    let fetched = backend.fetch(Purpose::Run, &Selection::Names(names))?;
     let mut cmd = Command::new(&command[0]);
     cmd.args(&command[1..])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for spec in specs {
-        let entry = get(&vault, &spec.name)?;
+        let values = &fetched[&spec.name];
         match &spec.key {
             None => {
-                for (k, v) in &entry.values {
+                for (k, v) in values {
                     cmd.env(k, v.expose_secret());
                 }
             }
             Some(key) => {
-                let v = entry
-                    .values
+                let v = values
                     .get(key)
                     .ok_or_else(|| anyhow!("entry {} has no key {key}", spec.name))?;
                 cmd.env(spec.var.as_ref().unwrap_or(key), v.expose_secret());
             }
         }
     }
-    let masker = vault.masker();
+    let masker = masker(&fetched);
     let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot run {}", command[0].to_string_lossy()))?;
@@ -331,24 +376,25 @@ fn pump(masker: &Masker, mut from: impl Read, to: impl Write) {
     }
 }
 
-fn render(store: &Store, template: &Path, allow: &[String]) -> Result<()> {
+fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>) -> Result<()> {
     let out = File::from(io::stdout().as_fd().try_clone_to_owned()?);
     if !out.metadata()?.is_file() {
-        bail!("stdout must be redirected to a file: safe render TEMPLATE --allow NAME > FILE");
+        bail!("stdout must be redirected to a file: agentsafe render TEMPLATE --allow NAME > FILE");
     }
     out.set_permissions(Permissions::from_mode(0o600))?;
     let source = fs::read_to_string(template)
         .with_context(|| format!("cannot read {}", template.display()))?;
-    let vault = store.load()?;
-    let mut ctx = BTreeMap::new();
-    for name in allow {
-        let values: BTreeMap<String, String> = get(&vault, name)?
-            .values
-            .iter()
-            .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
-            .collect();
-        ctx.insert(name.clone(), values);
-    }
+    let fetched = backend.fetch(Purpose::Render, &Selection::Names(allow))?;
+    let ctx: BTreeMap<String, BTreeMap<String, String>> = fetched
+        .iter()
+        .map(|(name, values)| {
+            let values = values
+                .iter()
+                .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
+                .collect();
+            (name.clone(), values)
+        })
+        .collect();
     let mut env = Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Strict);
     env.set_syntax(
@@ -359,7 +405,7 @@ fn render(store: &Store, template: &Path, allow: &[String]) -> Result<()> {
     );
     // Error details can quote rendered values: report only the kind and the line.
     let rendered = env
-        .render_str(&source, BTreeMap::from([("safe", ctx)]))
+        .render_str(&source, BTreeMap::from([("secrets", ctx)]))
         .map_err(|e| {
             anyhow!(
                 "template error: {} at line {}",
@@ -372,8 +418,9 @@ fn render(store: &Store, template: &Path, allow: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn verify_import(store: &Store, dir: &Path) -> Result<ExitCode> {
-    let vault = store.load()?;
+fn verify_import(backend: &dyn Backend, dir: &Path) -> Result<ExitCode> {
+    let catalog = backend.catalog()?;
+    let fetched = backend.fetch(Purpose::VerifyImport, &Selection::All)?;
     let mut files = Vec::new();
     for item in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
         let path = item?.path();
@@ -386,10 +433,10 @@ fn verify_import(store: &Store, dir: &Path) -> Result<ExitCode> {
     for path in files {
         let file_name = path.file_name().unwrap_or_default().to_string_lossy();
         let source = path.canonicalize()?.to_string_lossy().into_owned();
-        let Some((name, entry)) = vault
-            .entries
+        let Some((name, values)) = catalog
             .iter()
             .find(|(_, e)| e.meta.source.as_deref() == Some(&source))
+            .and_then(|(name, _)| fetched.get_key_value(name))
         else {
             println!("{file_name}\t-\tNOT IMPORTED");
             all_ok = false;
@@ -398,12 +445,7 @@ fn verify_import(store: &Store, dir: &Path) -> Result<ExitCode> {
         let text = Zeroizing::new(fs::read_to_string(&path).unwrap_or_default());
         let same = dotenv::parse(&text).is_ok_and(|parsed| {
             dotenv::fingerprint(parsed.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-                == dotenv::fingerprint(
-                    entry
-                        .values
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.expose_secret())),
-                )
+                == dotenv::fingerprint(values.iter().map(|(k, v)| (k.as_str(), v.expose_secret())))
         });
         println!(
             "{file_name}\t{name}\t{}",
@@ -416,11 +458,4 @@ fn verify_import(store: &Store, dir: &Path) -> Result<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
-}
-
-fn get<'a>(vault: &'a Vault, name: &str) -> Result<&'a Entry> {
-    vault
-        .entries
-        .get(name)
-        .ok_or_else(|| anyhow!("no entry named {name}"))
 }

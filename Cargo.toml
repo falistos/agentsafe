@@ -1,7 +1,13 @@
 [package]
-name = "safe"
+name = "agentsafe"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
+description = "A secrets manager for AI agents: names and metadata for the agent, values only inside child processes and rendered files"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/falistos/agentsafe"
+keywords = ["secrets", "age", "ai-agents", "cli", "vault"]
+categories = ["command-line-utilities", "cryptography"]
 
 [dependencies]
 age = "0.12.1"
