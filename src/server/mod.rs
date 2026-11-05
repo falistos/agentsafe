@@ -89,23 +89,22 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
             let _ = stopped.await;
         });
         let mut server = pin!(server.into_future());
-        let served = tokio::select! {
-            served = &mut server => served,
+        let outcome = tokio::select! {
+            outcome = &mut server => outcome,
             () = shutdown(term, int) => {
                 let _ = stop.send(());
                 // A stalled request is cut after the grace period. A write runs whole inside
                 // `spawn_blocking` under `vault.lock`, so nothing committed is lost.
-                match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
-                    Ok(served) => served,
-                    Err(_) => {
+                tokio::time::timeout(SHUTDOWN_GRACE, &mut server)
+                    .await
+                    .unwrap_or_else(|_| {
                         eprintln!("agentsafe: cut the requests still open after {SHUTDOWN_GRACE:?}");
                         Ok(())
-                    }
-                }
+                    })
             }
         };
         let removed = fs::remove_file(&socket);
-        served.context("server failed")?;
+        outcome.context("server failed")?;
         removed.with_context(|| format!("cannot remove {}", socket.display()))
     })
 }
@@ -318,7 +317,7 @@ async fn blocking<T: Send + 'static>(
     state: &AppState,
     f: impl FnOnce(&LocalBackend) -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    let backend = state.backend.clone();
+    let backend = Arc::clone(&state.backend);
     tokio::task::spawn_blocking(move || f(&backend))
         .await
         .map_err(|e| anyhow!("vault task failed: {e}"))?
@@ -387,7 +386,7 @@ struct Entries<T> {
 }
 
 async fn list(State(state): State<AppState>, Extension(ctx): Extension<Arc<Ctx>>) -> ApiResult {
-    let catalog = blocking(&state, |b| b.catalog()).await?;
+    let catalog = blocking(&state, Backend::catalog).await?;
     let entries: Catalog = catalog
         .into_iter()
         .filter(|(name, _)| ctx.rights.allows(Action::List, name))
@@ -406,7 +405,7 @@ async fn describe(
         let caller = ctx.caller.clone();
         return Ok(deny(&state, caller, "describe", Some(name), "not allowed").await);
     }
-    let mut catalog = blocking(&state, |b| b.catalog()).await?;
+    let mut catalog = blocking(&state, Backend::catalog).await?;
     match catalog.remove(&name) {
         Some(entry) => Ok(json(StatusCode::OK, &entry)),
         None => Err(anyhow::Error::from(Refusal::NotFound(name)).into()),
@@ -438,7 +437,7 @@ async fn fetch(
             }
             names
         }
-        (None, Some(true)) => blocking(&state, |b| b.catalog())
+        (None, Some(true)) => blocking(&state, Backend::catalog)
             .await?
             .into_keys()
             .filter(|n| ctx.rights.allows(Action::Get, n))
@@ -450,7 +449,7 @@ async fn fetch(
         b.fetch_as(&caller, Purpose::Get, &Selection::Names(names))
     })
     .await?;
-    let entries: BTreeMap<&str, Exposed> = fetched
+    let entries: BTreeMap<&str, Exposed<'_>> = fetched
         .iter()
         .map(|(name, values)| (name.as_str(), Exposed(values)))
         .collect();

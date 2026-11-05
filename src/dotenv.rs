@@ -24,7 +24,7 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, String>> {
     };
     let mut out = BTreeMap::new();
     loop {
-        p.skip_while(|c| c.is_whitespace());
+        p.skip_while(char::is_whitespace);
         let Some(c) = p.peek() else { break };
         if c == '#' {
             p.skip_while(|c| c != '\n');
@@ -66,11 +66,15 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, String>> {
 /// concatenation.
 pub fn fingerprint<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> [u8; 32] {
     let mut sorted: Vec<_> = pairs.into_iter().collect();
-    sorted.sort();
+    sorted.sort_unstable();
     let mut h = Sha256::new();
     for (k, v) in sorted {
         for field in [k, v] {
-            h.update((field.len() as u64).to_le_bytes());
+            h.update(
+                u64::try_from(field.len())
+                    .expect("a length fits in u64")
+                    .to_le_bytes(),
+            );
             h.update(field.as_bytes());
         }
     }

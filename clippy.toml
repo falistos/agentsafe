@@ -1,0 +1,7 @@
+# A bool parameter is unreadable at the call site: use a two-variant enum or two functions.
+max-fn-params-bools = 0
+
+# In tests a panic is the assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
