@@ -545,6 +545,108 @@ fn remote_run_set_edit_and_rm_act_on_the_server_vault() {
 }
 
 #[test]
+fn a_caller_with_put_but_no_get_rotates_one_key_and_keeps_the_others() {
+    let server = Server::start(Home::local());
+    server.home.ok_stdin(
+        &["set", "ovh"],
+        "OVH_APPLICATION_KEY=a-123456\nOVH_CONSUMER_KEY=ck-old-123456\n",
+    );
+    let proxy = Proxy::start(&server.socket);
+    proxy.peer(
+        Some(&caps(
+            r#"{"entries": ["ovh", "fresh"], "actions": ["put"]}"#,
+        )),
+        Some("alice@example.com"),
+    );
+    let client = Home::remote(&proxy);
+
+    let out = client.run(
+        &["set", "ovh", "--key", "OVH_CONSUMER_KEY"],
+        "ck-new-654321\n",
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stderr),
+        "stored ovh: set OVH_CONSUMER_KEY (2 keys)\n"
+    );
+
+    // The caller cannot read the entry back; the server's vault holds both keys.
+    assert!(
+        client
+            .fails(&["run", "--env", "ovh", "--", "true"])
+            .contains("403")
+    );
+    let check = "test \"$OVH_APPLICATION_KEY\" = a-123456 \
+        && test \"$OVH_CONSUMER_KEY\" = ck-new-654321 && echo same";
+    assert_eq!(
+        server
+            .home
+            .ok(&["run", "--env", "ovh", "--", "sh", "-c", check]),
+        "same\n"
+    );
+
+    // The entry is created when it does not exist, and `values` still replaces everything.
+    client.ok_stdin(&["set", "fresh", "--key", "TOKEN"], "fresh-token-value-1\n");
+    assert!(
+        server
+            .home
+            .ok(&["describe", "fresh"])
+            .contains("keys: TOKEN\n")
+    );
+    client.ok_stdin(&["set", "ovh"], "ONLY_KEY=only-value-123\n");
+    assert!(
+        server
+            .home
+            .ok(&["describe", "ovh"])
+            .contains("keys: ONLY_KEY\n")
+    );
+
+    let puts: Vec<_> = server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["entry"] == "ovh" && l["via"] != "local" && l["action"] != "get")
+        .collect();
+    assert_eq!(puts.len(), 2, "{puts:?}");
+    assert!(
+        puts.iter()
+            .all(|l| l["action"] == "put" && l["result"] == "ok")
+    );
+}
+
+#[test]
+fn merge_in_the_api_needs_put_and_excludes_values() {
+    let server = Server::start(Home::local());
+    let proxy = Proxy::start(&server.socket);
+    proxy.peer(
+        Some(&caps(r#"{"entries": ["other"], "actions": ["get"]}"#)),
+        Some("alice@example.com"),
+    );
+    let body = r#"{"merge": {"EXTRA": "merge-api-value-77"}}"#;
+    let (status, raw) = api(&proxy, "PUT", "/api/v1/entries/other", Some(body));
+    assert_eq!(status, 403, "{raw}");
+    assert!(!raw.contains("merge-api-value-77"));
+    assert!(!server.home.ok(&["describe", "other"]).contains("EXTRA"));
+
+    proxy.peer(
+        Some(&caps(r#"{"entries": ["other"], "actions": ["put"]}"#)),
+        Some("alice@example.com"),
+    );
+    let (status, raw) = api(&proxy, "PUT", "/api/v1/entries/other", Some(body));
+    assert_eq!((status, raw.as_str()), (200, r#"{"keys":2}"#));
+    assert!(
+        server
+            .home
+            .ok(&["describe", "other"])
+            .contains("keys: EXTRA, V\n")
+    );
+
+    let both = r#"{"values": {"A": "x"}, "merge": {"B": "y"}}"#;
+    let (status, raw) = api(&proxy, "PUT", "/api/v1/entries/other", Some(both));
+    assert_eq!(status, 400, "{raw}");
+}
+
+#[test]
 fn the_socket_is_private_replaces_a_stale_one_and_goes_away_on_sigterm() {
     let home = Home::local();
     let dir = tempfile::tempdir().unwrap();

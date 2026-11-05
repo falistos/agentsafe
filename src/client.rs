@@ -33,8 +33,15 @@ enum FetchBody<'a> {
 struct PutBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     values: Option<Exposed<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge: Option<Exposed<'a>>,
     #[serde(skip_serializing_if = "MetaPatch::is_empty")]
     meta: &'a MetaPatch,
+}
+
+#[derive(Deserialize)]
+struct Merged {
+    keys: usize,
 }
 
 #[derive(Deserialize)]
@@ -148,11 +155,24 @@ impl Backend for RemoteBackend {
         validate_name(name)?;
         let body = PutBody {
             values: put.values.as_ref().map(Exposed),
+            merge: None,
             meta: &put.meta,
         };
         let request = self.agent.put(self.url(&format!("entries/{name}")));
         self.send_json(request, &body, Some(name))?;
         Ok(())
+    }
+
+    fn merge(&self, name: &str, put: Put) -> Result<usize> {
+        validate_name(name)?;
+        let body = PutBody {
+            values: None,
+            merge: put.values.as_ref().map(Exposed),
+            meta: &put.meta,
+        };
+        let request = self.agent.put(self.url(&format!("entries/{name}")));
+        let merged: Merged = self.read(self.send_json(request, &body, Some(name))?)?;
+        Ok(merged.keys)
     }
 
     fn remove(&self, name: &str) -> Result<()> {

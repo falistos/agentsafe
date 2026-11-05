@@ -56,10 +56,10 @@ enum Cmd {
     List,
     /// Show one entry's metadata and key names, never its values.
     Describe { name: String },
-    /// Create or replace an entry's values, read from stdin: KEY=VALUE lines, or with --key KEY all of stdin as one value.
+    /// Create or replace an entry's values, read from stdin: KEY=VALUE lines, or with --key KEY all of stdin as that one key's value (the entry's other keys stay).
     Set {
         name: String,
-        /// Store all of stdin (minus one trailing newline) as this single key.
+        /// Set this key to all of stdin (minus one trailing newline); the entry's other keys stay.
         #[arg(long)]
         key: Option<String>,
         #[command(flatten)]
@@ -221,14 +221,13 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
             io::stdin()
                 .read_to_string(&mut input)
                 .context("stdin is not UTF-8 text")?;
-            let values = match key {
-                Some(key) => {
-                    let value = input.strip_suffix('\n').unwrap_or(&input);
-                    BTreeMap::from([(key, value.to_string())])
-                }
-                None => dotenv::parse(&input).context("stdin")?,
-            };
-            store_entry(backend, &name, values, meta, None)?;
+            if let Some(key) = key {
+                let value = input.strip_suffix('\n').unwrap_or(&input);
+                set_key(backend, &name, &key, value, meta)?;
+            } else {
+                let values = dotenv::parse(&input).context("stdin")?;
+                store_entry(backend, &name, values, meta, None)?;
+            }
         }
         Cmd::Import { file, name, meta } => {
             let text = Zeroizing::new(
@@ -346,6 +345,29 @@ fn store_entry(
         },
     )?;
     eprintln!("stored {name} ({count} keys)");
+    Ok(())
+}
+
+/// Sets one key of an entry and keeps its other keys.
+fn set_key(
+    backend: &dyn Backend,
+    name: &str,
+    key: &str,
+    value: &str,
+    meta: MetaArgs,
+) -> Result<()> {
+    let values = Values::from([(key.to_string(), SecretString::from(value))]);
+    if !short_keys(&values).is_empty() {
+        eprintln!("warning: {key} under {MIN_LEN} bytes, will not be masked");
+    }
+    let keys = backend.merge(
+        name,
+        Put {
+            values: Some(values),
+            meta: meta.into_patch(None),
+        },
+    )?;
+    eprintln!("stored {name}: set {key} ({keys} keys)");
     Ok(())
 }
 

@@ -459,8 +459,16 @@ async fn fetch(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PutBody {
+    /// Replaces all of the entry's values.
     values: Option<Values>,
+    /// Added to the entry's values, which keep their other keys.
+    merge: Option<Values>,
     meta: Option<MetaPatch>,
+}
+
+#[derive(Serialize)]
+struct Merged {
+    keys: usize,
 }
 
 async fn put(
@@ -472,18 +480,32 @@ async fn put(
     checked_name(&name)?;
     let body: PutBody = parse_body(body)?;
     let meta = body.meta.unwrap_or_default();
-    if body.values.is_none() && meta.is_empty() {
-        return Err(bad_request("give `values`, `meta` or both"));
+    if body.values.is_some() && body.merge.is_some() {
+        return Err(bad_request("give `values` or `merge`, not both"));
     }
-    let action = if body.values.is_some() { "put" } else { "edit" };
+    if body.values.is_none() && body.merge.is_none() && meta.is_empty() {
+        return Err(bad_request(
+            "give `values`, `merge`, `meta` or a combination",
+        ));
+    }
+    let merging = body.merge.is_some();
+    let action = if body.values.is_some() || merging {
+        "put"
+    } else {
+        "edit"
+    };
     let caller = ctx.caller.clone();
     if !ctx.rights.allows(Action::Put, &name) {
         return Ok(deny(&state, caller, action, Some(name), "not allowed").await);
     }
     let put = Put {
-        values: body.values,
+        values: body.values.or(body.merge),
         meta,
     };
+    if merging {
+        let keys = blocking(&state, move |b| b.merge_as(&caller, &name, put)).await?;
+        return Ok(json(StatusCode::OK, &Merged { keys }));
+    }
     blocking(&state, move |b| b.put_as(&caller, &name, put)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

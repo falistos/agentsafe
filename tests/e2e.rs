@@ -1128,6 +1128,74 @@ fn a_crlf_env_file_imports() {
     assert_eq!(text(&out.stdout), "win.env\twin\tOK\n");
 }
 
+const OVH_CHECK: &str = "test \"$OVH_APPLICATION_KEY\" = a-123456 \
+    && test \"$OVH_CONSUMER_KEY\" = ck-new-654321 && echo same";
+
+#[test]
+fn set_with_a_key_changes_that_key_and_keeps_the_others_and_the_metadata() {
+    let home = Home::new();
+    let out = home.agentsafe_stdin(
+        &["set", "ovh", "--description", "OVH API"],
+        "OVH_APPLICATION_KEY=a-123456\nOVH_CONSUMER_KEY=ck-old-123456\n",
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let out = home.agentsafe_stdin(
+        &["set", "ovh", "--key", "OVH_CONSUMER_KEY"],
+        "ck-new-654321\n",
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stderr),
+        "stored ovh: set OVH_CONSUMER_KEY (2 keys)\n"
+    );
+
+    let described = text(&home.agentsafe(&["describe", "ovh"]).stdout);
+    assert!(
+        described.contains("keys: OVH_APPLICATION_KEY, OVH_CONSUMER_KEY\n"),
+        "{described}"
+    );
+    assert!(described.contains("description: OVH API\n"), "{described}");
+    let out = home.agentsafe(&["run", "--env", "ovh", "--", "sh", "-c", OVH_CHECK]);
+    assert_eq!(text(&out.stdout), "same\n", "{}", text(&out.stderr));
+
+    // A key that is not there yet is added.
+    let out = home.agentsafe_stdin(&["set", "ovh", "--key", "OVH_ENDPOINT"], "ovh-eu\n");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("(3 keys)"));
+
+    let writes: Vec<_> = home
+        .audit_lines()
+        .into_iter()
+        .filter(|l| l["action"] != "run")
+        .collect();
+    assert_eq!(writes.len(), 3, "{writes:?}");
+    assert!(
+        writes
+            .iter()
+            .all(|l| l["action"] == "put" && l["result"] == "ok")
+    );
+    assert!(
+        !fs::read_to_string(home.path("audit.jsonl"))
+            .unwrap()
+            .contains("ck-new")
+    );
+}
+
+#[test]
+fn set_with_lines_still_replaces_every_value() {
+    let home = Home::new();
+    home.agentsafe_stdin(
+        &["set", "ovh"],
+        "OLD_ONE=old-value-1\nOLD_TWO=old-value-2\n",
+    );
+    let out = home.agentsafe_stdin(&["set", "ovh"], "NEW_ONE=new-value-1\n");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "stored ovh (1 keys)\n");
+    let described = text(&home.agentsafe(&["describe", "ovh"]).stdout);
+    assert!(described.contains("keys: NEW_ONE\n"), "{described}");
+}
+
 /// Base64 tokens as a tunnel token file holds them: one line, `=` padding, no key.
 const PADDED_TOKENS: [&str; 2] = [
     "eyJhIjoiZml4dHVyZS1hY2NvdW50IiwidCI6Ijk5In0=",

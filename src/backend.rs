@@ -140,6 +140,15 @@ pub struct Put {
     pub meta: MetaPatch,
 }
 
+/// How the values of a [`Put`] meet the entry's own.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// They become all of the entry's values.
+    Replace,
+    /// They are added to the entry's values, replacing those with the same key.
+    Merge,
+}
+
 /// Where the vault lives: every command except `init` goes through it.
 pub trait Backend {
     /// Metadata and key names of every entry; no values.
@@ -147,6 +156,9 @@ pub trait Backend {
     /// The values of the selected entries.
     fn fetch(&self, purpose: Purpose, selection: &Selection) -> Result<Fetched>;
     fn put(&self, name: &str, put: Put) -> Result<()>;
+    /// Like `put`, but the values are added to the entry's: the other keys are kept. Creates the
+    /// entry when it does not exist. Returns how many keys the entry has afterwards.
+    fn merge(&self, name: &str, put: Put) -> Result<usize>;
     fn remove(&self, name: &str) -> Result<()>;
 }
 
@@ -271,7 +283,7 @@ impl LocalBackend {
         result
     }
 
-    fn apply_put(&self, name: &str, put: Put, expect: Expect) -> Result<()> {
+    fn apply_put(&self, name: &str, put: Put, expect: Expect, mode: Mode) -> Result<usize> {
         validate_name(name).map_err(|e| Refusal::Invalid(e.to_string()))?;
         self.store.update(|vault| {
             let present = vault.entries.contains_key(name);
@@ -292,9 +304,12 @@ impl LocalBackend {
             };
             put.meta.apply(&mut entry.meta)?;
             if let Some(values) = put.values {
-                entry.values = values;
+                match mode {
+                    Mode::Replace => entry.values = values,
+                    Mode::Merge => entry.values.extend(values),
+                }
             }
-            Ok(())
+            Ok(entry.values.len())
         })
     }
 
@@ -422,7 +437,17 @@ impl LocalBackend {
         expect: Expect,
     ) -> Result<()> {
         let action = if put.values.is_some() { "put" } else { "edit" };
-        self.audited_write(caller, action, name, || self.apply_put(name, put, expect))
+        self.audited_write(caller, action, name, || {
+            self.apply_put(name, put, expect, Mode::Replace)
+        })?;
+        Ok(())
+    }
+
+    /// `put_as` that keeps the keys `put` does not name; audited as `put`.
+    pub fn merge_as(&self, caller: &Caller, name: &str, put: Put) -> Result<usize> {
+        self.audited_write(caller, "put", name, || {
+            self.apply_put(name, put, Expect::Any, Mode::Merge)
+        })
     }
 
     pub fn remove_as(&self, caller: &Caller, name: &str) -> Result<()> {
@@ -448,6 +473,10 @@ impl Backend for LocalBackend {
 
     fn put(&self, name: &str, put: Put) -> Result<()> {
         self.put_as(&self.user, name, put)
+    }
+
+    fn merge(&self, name: &str, put: Put) -> Result<usize> {
+        self.merge_as(&self.user, name, put)
     }
 
     fn remove(&self, name: &str) -> Result<()> {
