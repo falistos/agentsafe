@@ -4,8 +4,9 @@
 
 - Local CLI on an age vault: `init`, `list`, `describe`, `set`, `import`, `edit`, `rm`, `run` with
   masked output, `render`, `scrub`, `verify-import`.
-- Streamed masking of raw values, base64, hex, JSON as `serde_json` writes it and percent-encoding
-  with upper-case hex.
+- Streamed masking of raw values, base64, hex, JSON as `serde_json` writes it (also with
+  lower-case `\uXXXX` escapes of non-ASCII characters and `\/`) and percent-encoding with upper- or
+  lower-case hex.
 - Writes under `vault.lock`; the catalog derived from the vault, `catalog.toml` an export only.
 - An audit log of value fetches, writes and refused requests (successful catalog reads are not
   logged).
@@ -18,16 +19,12 @@
 
 ## Left
 
-- Masking of more spellings: lower-case percent escapes and JSON `\uXXXX` escapes of non-ASCII
-  values ([#9](https://github.com/falistos/agentsafe/issues/9)).
 - `run` through a pty, for interactive commands: today the child's stdout and stderr are pipes.
 - `export`, to regenerate an env file from the vault, and `export --check`, to report drift
   without printing values.
 - An agent hook that pipes tool output through `agentsafe scrub` before the agent reads it.
 - A test on a real tailnet: Serve's headers, the policy example and the unit file of
   [deploy.md](deploy.md).
-- UI security headers on authorization refusals
-  ([#7](https://github.com/falistos/agentsafe/issues/7)).
 
 ## Later: short-lived credentials
 

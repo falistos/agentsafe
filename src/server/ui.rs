@@ -11,7 +11,7 @@ use anyhow::Result;
 use axum::Router;
 use axum::extract::rejection::FormRejection;
 use axum::extract::{Extension, Form, Path as UrlPath, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -20,7 +20,6 @@ use minijinja::value::Serde;
 use minijinja::{Environment, UndefinedBehavior, Value, context};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use super::{AppState, Ctx, blocking};
 use crate::backend::{Backend, Expect, MetaPatch, Put, Refusal, Values};
@@ -28,8 +27,6 @@ use crate::dotenv;
 use crate::policy::Action;
 use crate::vault::{Catalog, CatalogEntry, validate_name};
 
-const CSP: &str =
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'";
 const NTFY_TIMEOUT: Duration = Duration::from_secs(3);
 const AUDIT_LINES: usize = 200;
 /// How much of the end of `audit.jsonl` is read: far more than `AUDIT_LINES` lines.
@@ -73,7 +70,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .layer(middleware::from_fn_with_state(state, guard))
 }
 
-/// CSRF check on every request that is not a read, and the security headers of every answer.
+/// CSRF check on every request that is not a read. The security headers are set by `authorize`.
 async fn guard(
     State(state): State<AppState>,
     Extension(ctx): Extension<Arc<Ctx>>,
@@ -81,22 +78,12 @@ async fn guard(
     next: Next,
 ) -> Response {
     let read = matches!(*req.method(), Method::GET | Method::HEAD);
-    let mut response = if read || same_origin(req.headers()) {
+    if read || same_origin(req.headers()) {
         next.run(req).await
     } else {
         record_denied(&state, &ctx, "request", None, "cross-origin request").await;
         UiError::new(StatusCode::FORBIDDEN, "Cross-origin request refused.").into_response()
-    };
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
-    );
-    headers.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    response
+    }
 }
 
 /// Go's `http.CrossOriginProtection`: `Sec-Fetch-Site` decides when the browser sends it, else
@@ -359,9 +346,8 @@ impl MetaForm {
 
 /// `KEY=VALUE` lines as `set` reads them. The error names a line, never its content.
 fn parse_values(text: &str) -> Result<Values, UiError> {
-    let text = Zeroizing::new(text.replace("\r\n", "\n"));
     let parsed =
-        dotenv::parse(&text).map_err(|e| UiError::bad_request(format!("Invalid values: {e}.")))?;
+        dotenv::parse(text).map_err(|e| UiError::bad_request(format!("Invalid values: {e}.")))?;
     Ok(parsed
         .into_iter()
         .map(|(k, v)| (k, SecretString::from(v)))

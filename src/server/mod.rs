@@ -35,6 +35,8 @@ use crate::policy::{self, Action, Rights};
 use crate::vault::{Catalog, Store, validate_name};
 
 const BODY_LIMIT: usize = 64 * 1024;
+const UI_CSP: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'";
 /// How long in-flight requests may run after SIGTERM or SIGINT.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
@@ -207,6 +209,7 @@ fn app(backend: Arc<LocalBackend>, dir: &Path, ntfy: Option<Arc<str>>) -> Router
 
 /// Runs on every request, matched or not: rights from the Serve headers, then the CSRF header.
 async fn authorize(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let ui = !req.uri().path().starts_with("/api/");
     let headers = req.headers();
     let caller = caller(headers, req.uri().path());
     let (rights, warnings) = policy::parse(
@@ -239,9 +242,19 @@ async fn authorize(State(state): State<AppState>, mut req: Request, next: Next) 
         }
         None => next.run(req).await,
     };
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Here rather than in the UI router, so refusals and unknown paths get them too.
+    if ui {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(UI_CSP),
+        );
+        headers.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
+    }
     response
 }
 

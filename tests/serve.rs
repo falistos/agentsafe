@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -21,6 +21,28 @@ const DB_PASSWORD: &str = "fx-pa\"ss:word/with+chars";
 const OTHER_VALUE: &str = "other-fixture-value-31415";
 const CAP: &str = "github.com/falistos/agentsafe/cap/agentsafe";
 const PEER: &str = "100.101.102.103";
+
+/// An empty vault encrypted to `identity`, as `init` leaves it.
+fn write_empty_vault(dir: &Path, identity: &age::x25519::Identity) {
+    let recipient = identity.to_public();
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .unwrap();
+    let mut encrypted = Vec::new();
+    encryptor
+        .wrap_output(&mut encrypted)
+        .unwrap()
+        .finish()
+        .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir.join("vault.age"))
+        .unwrap()
+        .write_all(&encrypted)
+        .unwrap();
+}
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
@@ -46,6 +68,7 @@ impl Home {
             format!("identity = {:?}\n", key.to_str().unwrap()),
         )
         .unwrap();
+        write_empty_vault(dir.path(), &identity);
         let home = Home { dir };
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/env");
         for name in ["app", "db"] {
@@ -1482,4 +1505,71 @@ fn an_admin_of_a_prefix_keeps_the_ui_after_the_last_matching_entry_is_gone() {
     );
     assert_eq!(get(&proxy, "/").status, 403);
     assert_eq!(get(&proxy, "/new").status, 403);
+}
+
+#[test]
+fn every_non_api_answer_carries_the_ui_headers() {
+    let server = Server::start(Home::local());
+    let proxy = Proxy::start(&server.socket);
+    let csp =
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'";
+    let peers = [
+        (None, "/", 403),
+        (None, "/nothing-here", 403),
+        (
+            Some(caps(r#"{"entries": ["*"], "actions": ["get"]}"#)),
+            "/",
+            403,
+        ),
+        (Some(admin_of(r#""*""#)), "/nothing-here", 404),
+    ];
+    for (peer, path, status) in peers {
+        proxy.peer(peer.as_deref(), None);
+        let reply = get(&proxy, path);
+        assert_eq!(reply.status, status, "{peer:?} {path}");
+        assert_eq!(
+            reply.header("content-security-policy"),
+            csp,
+            "{peer:?} {path}"
+        );
+        assert_eq!(
+            reply.header("referrer-policy"),
+            "no-referrer",
+            "{peer:?} {path}"
+        );
+        assert_eq!(reply.header("cache-control"), "no-store", "{peer:?} {path}");
+    }
+}
+
+#[test]
+fn sigterm_completes_while_another_process_holds_the_vault_lock() {
+    let mut server = Server::start(Home::local());
+    let lock = fs::File::create(server.home.path("vault.lock")).unwrap();
+    lock.lock().unwrap();
+    let body = r#"{"meta": {"owner": "late-owner"}}"#;
+    let request = format!(
+        "PUT /api/v1/entries/app HTTP/1.1\r\nHost: localhost\r\nSec-Agentsafe: 1\r\n\
+         Tailscale-App-Capabilities: {}\r\nContent-Length: {}\r\n\r\n{body}",
+        caps(r#"{"entries": ["*"], "actions": ["admin"]}"#),
+        body.len()
+    );
+    let mut conn = UnixStream::connect(&server.socket).unwrap();
+    conn.write_all(request.as_bytes()).unwrap();
+    // Let the write start waiting on the lock.
+    thread::sleep(Duration::from_millis(300));
+
+    let child = server.child.as_mut().unwrap();
+    terminate(child);
+    // The 5 s grace, then at most the 5 s lock wait of a write already started.
+    let status = wait_at_most(child, Duration::from_secs(12));
+    assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    server.child = None;
+    assert!(!server.socket.exists());
+    drop(lock);
+    drop(conn);
+    let described = server.home.ok(&["describe", "app"]);
+    assert!(
+        !described.contains("late-owner"),
+        "the write applied after shutdown"
+    );
 }

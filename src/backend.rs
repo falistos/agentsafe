@@ -244,24 +244,30 @@ impl LocalBackend {
         })
     }
 
-    /// Audits the outcome of an operation on one entry; an audit failure wins over the result.
-    fn record_result<T>(
+    /// Runs a write on one entry and audits its outcome. The log is opened first: if it cannot
+    /// be, nothing changes. An audit failure after the write wins over its result.
+    fn audited_write<T>(
         &self,
         caller: &Caller,
         action: &str,
         entry: &str,
-        result: Result<T>,
+        write: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
-        match &result {
-            Ok(_) => self.record(caller, action, Some(entry), Outcome::Ok, None)?,
-            Err(e) => self.record(
-                caller,
-                action,
-                Some(entry),
-                Outcome::Error,
-                Some(format!("{e:#}")),
-            )?,
-        }
+        let log = self.audit.open()?;
+        let result = write();
+        let (outcome, reason) = match &result {
+            Ok(_) => (Outcome::Ok, None),
+            Err(e) => (Outcome::Error, Some(format!("{e:#}"))),
+        };
+        log.append(&Event {
+            who: caller.who.clone(),
+            via: caller.via.into(),
+            action: action.into(),
+            entry: Some(entry.to_string()),
+            result: outcome,
+            reason,
+            notify: None,
+        })?;
         result
     }
 
@@ -416,18 +422,18 @@ impl LocalBackend {
         expect: Expect,
     ) -> Result<()> {
         let action = if put.values.is_some() { "put" } else { "edit" };
-        let result = self.apply_put(name, put, expect);
-        self.record_result(caller, action, name, result)
+        self.audited_write(caller, action, name, || self.apply_put(name, put, expect))
     }
 
     pub fn remove_as(&self, caller: &Caller, name: &str) -> Result<()> {
-        let result = self.store.update(|vault| {
-            if vault.entries.remove(name).is_none() {
-                return Err(Refusal::NotFound(name.into()).into());
-            }
-            Ok(())
-        });
-        self.record_result(caller, "rm", name, result)
+        self.audited_write(caller, "rm", name, || {
+            self.store.update(|vault| {
+                if vault.entries.remove(name).is_none() {
+                    return Err(Refusal::NotFound(name.into()).into());
+                }
+                Ok(())
+            })
+        })
     }
 }
 

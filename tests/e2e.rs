@@ -1,10 +1,11 @@
 use std::fs::{self, File};
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::Barrier;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE};
@@ -42,6 +43,7 @@ impl Home {
             format!("identity = {:?}\n", key.to_str().unwrap()),
         )
         .unwrap();
+        write_empty_vault(dir.path(), &identity);
         Home { dir, config: None }
     }
 
@@ -98,6 +100,28 @@ impl Home {
             assert!(out.status.success(), "{}", text(&out.stderr));
         }
     }
+}
+
+/// An empty vault encrypted to `identity`, as `init` leaves it.
+fn write_empty_vault(dir: &Path, identity: &age::x25519::Identity) {
+    let recipient = identity.to_public();
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .unwrap();
+    let mut encrypted = Vec::new();
+    encryptor
+        .wrap_output(&mut encrypted)
+        .unwrap()
+        .finish()
+        .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir.join("vault.age"))
+        .unwrap()
+        .write_all(&encrypted)
+        .unwrap();
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -227,39 +251,81 @@ fn describe_flags_values_too_short_to_mask() {
 }
 
 #[test]
-fn render_writes_only_to_a_regular_file() {
+fn render_publishes_a_private_file_by_rename() {
     let home = Home::new();
     home.import_fixtures();
-    let template = home.dir.path().join("t.j2");
+    let template = home.path("t.j2");
     fs::write(&template, "token={{ secrets.app.API_TOKEN }}\n").unwrap();
-    let target = home.dir.path().join("out.conf");
-    let status = home
-        .cmd(&["render", template.to_str().unwrap(), "--allow", "app"])
-        .stdout(File::create(&target).unwrap())
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let target = home.path("out.conf");
+    fs::write(&target, "old\n").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+    // A reader that opened the old file never sees what render writes.
+    let mut reader = File::open(&target).unwrap();
+    let t = template.to_str().unwrap();
+    let out = home.agentsafe(&[
+        "render",
+        t,
+        "--allow",
+        "app",
+        "-o",
+        target.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty());
+    let mut seen = String::new();
+    reader.read_to_string(&mut seen).unwrap();
+    assert_eq!(seen, "old\n");
     assert_eq!(
         fs::read_to_string(&target).unwrap(),
         format!("token={API_TOKEN}\n")
     );
-    assert_eq!(
-        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert_eq!(mode(&target), 0o600);
 
-    let piped = home.agentsafe(&["render", template.to_str().unwrap(), "--allow", "app"]);
-    assert!(!piped.status.success());
-    assert!(piped.stdout.is_empty());
+    let mut names: Vec<String> = fs::read_dir(home.dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with('.'))
+        .collect();
+    names.sort();
+    assert!(names.is_empty(), "temporary files left: {names:?}");
 
-    let target = home.dir.path().join("denied.conf");
-    let status = home
-        .cmd(&["render", template.to_str().unwrap(), "--allow", "db"])
-        .stdout(File::create(&target).unwrap())
-        .status()
+    // A bare file name lands in the current directory.
+    let out = home
+        .cmd(&["render", t, "--allow", "app", "-o", "bare.conf"])
+        .current_dir(home.dir.path())
+        .stdin(Stdio::null())
+        .output()
         .unwrap();
-    assert!(!status.success());
-    assert!(!fs::read_to_string(&target).unwrap().contains(API_TOKEN));
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(mode(&home.path("bare.conf")), 0o600);
+
+    // No output, a missing parent, or a denied template: nothing is written.
+    assert!(
+        !home
+            .agentsafe(&["render", t, "--allow", "app"])
+            .status
+            .success()
+    );
+    let orphan = home.path("missing/out.conf");
+    let out = home.agentsafe(&[
+        "render",
+        t,
+        "--allow",
+        "app",
+        "-o",
+        orphan.to_str().unwrap(),
+    ]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("does not exist"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!home.path("missing").exists());
+    let denied = home.path("denied.conf");
+    let out = home.agentsafe(&["render", t, "--allow", "db", "-o", denied.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(!denied.exists());
 }
 
 #[test]
@@ -548,12 +614,19 @@ fn render_reads_the_secrets_namespace() {
         let path = home.path("t.j2");
         fs::write(&path, template).unwrap();
         let target = home.path("out.conf");
-        let status = home
-            .cmd(&["render", path.to_str().unwrap(), "--allow", "app"])
-            .stdout(File::create(&target).unwrap())
-            .status()
-            .unwrap();
-        (status.success(), fs::read_to_string(&target).unwrap())
+        let _ = fs::remove_file(&target);
+        let out = home.agentsafe(&[
+            "render",
+            path.to_str().unwrap(),
+            "--allow",
+            "app",
+            "--output",
+            target.to_str().unwrap(),
+        ]);
+        (
+            out.status.success(),
+            fs::read_to_string(&target).unwrap_or_default(),
+        )
     };
     let (ok, out) = render("t={{ secrets[\"app\"].API_TOKEN }}\n");
     assert!(ok);
@@ -581,12 +654,16 @@ fn audit_log_records_every_operation_and_never_a_value() {
         "{{ secrets.app.API_TOKEN }}{{ secrets.app.PIN }}\n",
     )
     .unwrap();
-    let rendered = home
-        .cmd(&["render", template.to_str().unwrap(), "--allow", "app"])
-        .stdout(File::create(home.path("out.conf")).unwrap())
-        .status()
-        .unwrap();
-    assert!(rendered.success());
+    let out_conf = home.path("out.conf");
+    let rendered = home.agentsafe(&[
+        "render",
+        template.to_str().unwrap(),
+        "--allow",
+        "app",
+        "-o",
+        out_conf.to_str().unwrap(),
+    ]);
+    assert!(rendered.status.success());
     let fixtures_dir = fixtures();
     let steps: [&[&str]; 8] = [
         &["run", "--env", "app", "--env", "db", "--", "true"],
@@ -773,4 +850,313 @@ fn concurrent_sets_lose_no_entry() {
         }
     }
     assert_eq!(mode(&home.path("vault.lock")), 0o600);
+}
+
+/// The exit status, or `None` (and the child killed) if it still runs after `limit`.
+fn wait_at_most(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_missing_vault_is_an_error_everywhere() {
+    let home = Home::new();
+    home.import_fixtures();
+    fs::rename(home.path("vault.age"), home.path("vault.age.bak")).unwrap();
+
+    let out = home.agentsafe_stdin(&["scrub"], &format!("token {API_TOKEN}\n"));
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(
+        text(&out.stderr).contains("no vault at"),
+        "{}",
+        text(&out.stderr)
+    );
+    let marker = home.path("ran");
+    let script = format!("touch {}", marker.display());
+    let out = home.agentsafe(&["run", "--env", "app", "--", "sh", "-c", &script]);
+    assert!(!out.status.success());
+    assert!(!marker.exists());
+    for args in [&["list"][..], &["describe", "app"], &["rm", "app"]] {
+        let out = home.agentsafe(args);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(text(&out.stderr).contains("no vault at"), "{args:?}");
+    }
+    let out = home.agentsafe_stdin(&["set", "x", "--key", "K"], "value-123456\n");
+    assert!(!out.status.success());
+    assert!(!home.path("vault.age").exists());
+}
+
+#[test]
+fn init_creates_an_empty_vault_and_init_server_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("local/config.toml");
+    assert!(cli(&config, &["init"]).status.success());
+    let vault = config.with_file_name("vault.age");
+    assert_eq!(mode(&vault), 0o600);
+    let out = cli(&config, &["list"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).lines().count(), 1);
+
+    let remote = tmp.path().join("remote/config.toml");
+    assert!(
+        cli(&remote, &["init", "--server", "http://127.0.0.1:1"])
+            .status
+            .success()
+    );
+    assert!(!remote.with_file_name("vault.age").exists());
+
+    // An existing vault is never overwritten, nor paired with a new identity.
+    let restored = tmp.path().join("restored/config.toml");
+    fs::create_dir(restored.parent().unwrap()).unwrap();
+    fs::write(restored.with_file_name("vault.age"), "backup").unwrap();
+    assert!(!cli(&restored, &["init"]).status.success());
+    assert_eq!(
+        fs::read_to_string(restored.with_file_name("vault.age")).unwrap(),
+        "backup"
+    );
+    assert!(!restored.exists());
+}
+
+#[test]
+fn a_write_that_cannot_be_audited_changes_nothing() {
+    let home = Home::new();
+    home.import_fixtures();
+    fs::remove_file(home.path("audit.jsonl")).unwrap();
+    fs::create_dir(home.path("audit.jsonl")).unwrap();
+
+    assert!(!home.agentsafe(&["rm", "app"]).status.success());
+    let out = home.agentsafe_stdin(&["set", "app", "--key", "NEW"], "new-value-123456\n");
+    assert!(!out.status.success());
+    let out = home.agentsafe_stdin(&["set", "fresh", "--key", "K"], "fresh-value-123456\n");
+    assert!(!out.status.success());
+    assert!(
+        !home
+            .agentsafe(&["edit", "db", "--owner", "x"])
+            .status
+            .success()
+    );
+
+    let list = text(&home.agentsafe(&["list"]).stdout);
+    assert!(
+        list.contains("app\t4\t") && list.contains("db\t3\t-\t"),
+        "{list}"
+    );
+    assert!(!list.contains("fresh"), "{list}");
+    let describe = text(&home.agentsafe(&["describe", "app"]).stdout);
+    assert!(
+        describe.contains("keys: API_TOKEN, API_URL, GREETING, PIN"),
+        "{describe}"
+    );
+}
+
+#[test]
+fn config_errors_never_quote_the_file() {
+    let home = Home::new();
+    let config = home.path("config.toml");
+    let base = fs::read_to_string(&config).unwrap();
+    let topic = "https://ntfy.example/fixture-topic-8b1e";
+    for (extra, line) in [
+        (format!("[serve]\nntfy = \"{topic}\" trailing\n"), 3),
+        (format!("recipients = \"{topic}\"\n"), 2),
+    ] {
+        fs::write(&config, format!("{base}{extra}")).unwrap();
+        let out = home.agentsafe(&["list"]);
+        assert!(!out.status.success());
+        let err = text(&out.stderr);
+        assert!(!err.contains("fixture-topic"), "the config line was quoted");
+        assert!(err.contains(config.to_str().unwrap()), "{err}");
+        assert!(err.contains(&format!("line {line}, column")), "{err}");
+    }
+
+    // A recipient that is a secret key pasted by mistake is not quoted either.
+    let pasted = "AGE-SECRET-KEY-1FIXTURENOTAREALKEYFIXTURENOTAREALKEYFIXTURENOTAREAL";
+    fs::write(&config, format!("{base}recipients = [\"{pasted}\"]\n")).unwrap();
+    let out = home.agentsafe_stdin(&["set", "x", "--key", "K"], "value-123456\n");
+    assert!(!out.status.success());
+    assert!(
+        !text(&out.stderr).contains("FIXTURENOTAREALKEY"),
+        "the recipient was quoted"
+    );
+}
+
+#[test]
+fn a_failing_catalog_export_is_a_warning_after_the_commit() {
+    let home = Home::new();
+    home.import_fixtures();
+    fs::remove_file(home.path("catalog.toml")).unwrap();
+    fs::create_dir(home.path("catalog.toml")).unwrap();
+
+    let out = home.agentsafe(&["rm", "app"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("warning"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!text(&home.agentsafe(&["list"]).stdout).contains("app\t"));
+    let last = home.audit_lines().pop().unwrap();
+    assert_eq!(
+        (&last["action"], &last["result"]),
+        (&"rm".into(), &"ok".into())
+    );
+}
+
+#[test]
+fn a_relative_config_path_works() {
+    let home = Home::new();
+    let out = home
+        .cmd(&["set", "cloud", "--key", "TOKEN"])
+        .env("AGENTSAFE_CONFIG", "config.toml")
+        .current_dir(home.dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"relative-value-123\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&home.agentsafe(&["list"]).stdout).contains("cloud\t1\t"));
+}
+
+#[test]
+fn a_write_against_a_held_lock_fails_as_busy() {
+    let home = Home::new();
+    home.import_fixtures();
+    let lock = File::create(home.path("vault.lock")).unwrap();
+    lock.lock().unwrap();
+
+    let started = Instant::now();
+    let mut child = home
+        .cmd(&["rm", "app"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status = wait_at_most(&mut child, Duration::from_secs(9));
+    assert!(status.is_some_and(|s| !s.success()), "{status:?}");
+    assert!(started.elapsed() >= Duration::from_secs(4));
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert!(err.contains("vault is busy"), "{err}");
+
+    drop(lock);
+    assert!(text(&home.agentsafe(&["list"]).stdout).contains("app\t4\t"));
+}
+
+#[test]
+fn a_crlf_env_file_imports() {
+    let home = Home::new();
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("win.env");
+    fs::write(
+        &file,
+        "# windows\r\nexport TOKEN=\"crlf-quoted-value-1\"\r\nBARE=crlf-bare-value-2\r\nMULTI=\"a\r\nb\"\r\nLONE=\"x\ry\"\r\n",
+    )
+    .unwrap();
+    let out = home.agentsafe(&["import", file.to_str().unwrap(), "--name", "win"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let script = "test \"$TOKEN\" = crlf-quoted-value-1 && test \"$BARE\" = crlf-bare-value-2 \
+                  && test \"$MULTI\" = \"$(printf 'a\\nb')\" && test \"$LONE\" = \"$(printf 'x\\ry')\" \
+                  && echo same";
+    let out = home.agentsafe(&["run", "--env", "win", "--", "sh", "-c", script]);
+    assert_eq!(text(&out.stdout), "same\n", "{}", text(&out.stderr));
+    let out = home.agentsafe(&["verify-import", src.path().to_str().unwrap()]);
+    assert_eq!(text(&out.stdout), "win.env\twin\tOK\n");
+}
+
+/// JSON as Python's `json.dumps` writes it: non-ASCII as lower-case `\uXXXX`, astral characters
+/// as surrogate pairs.
+fn json_ascii(value: &str) -> String {
+    let mut out = String::new();
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
+            c => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn run_and_scrub_mask_the_extra_json_and_percent_spellings() {
+    let home = Home::new();
+    let value = "fx/välue-🔑-2718";
+    let out = home.agentsafe_stdin(&["set", "uni", "--key", "V"], value);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let serde = serde_json::to_string(value).unwrap();
+    let spellings = [
+        json_ascii(value),
+        serde[1..serde.len() - 1].replace('/', "\\/"),
+        value
+            .bytes()
+            .map(|b| match b {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' => (b as char).to_string(),
+                b => format!("%{b:02x}"),
+            })
+            .collect(),
+    ];
+    assert_eq!(spellings[0], "fx/v\\u00e4lue-\\ud83d\\udd11-2718");
+    for spelling in &spellings {
+        let out = home.agentsafe(&[
+            "run",
+            "--env",
+            "uni",
+            "--",
+            "sh",
+            "-c",
+            "printf '<%s>\\n' \"$1\"",
+            "sh",
+            spelling,
+        ]);
+        assert_eq!(text(&out.stdout), "<***uni***>\n", "{spelling}");
+        let out = home.agentsafe_stdin(&["scrub"], &format!("<{spelling}>\n"));
+        assert_eq!(text(&out.stdout), "<***uni***>\n", "{spelling}");
+    }
+}
+
+#[test]
+fn set_help_names_both_input_forms() {
+    let out = Command::new(env!("CARGO_BIN_EXE_agentsafe"))
+        .args(["set", "--help"])
+        .output()
+        .unwrap();
+    let about = text(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        about.contains("KEY=VALUE") && about.contains("--key"),
+        "{about}"
+    );
 }

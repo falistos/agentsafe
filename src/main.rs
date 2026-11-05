@@ -11,10 +11,8 @@ mod vault;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{self, File, Permissions};
+use std::fs;
 use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -34,7 +32,7 @@ use crate::backend::{
 use crate::client::RemoteBackend;
 use crate::config::{Config, Mode};
 use crate::mask::{MIN_LEN, Masker};
-use crate::vault::Store;
+use crate::vault::{Store, write_atomic};
 
 /// Secrets for AI agents: values go into child processes and files, never to the caller's output.
 ///
@@ -48,7 +46,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create the config and a new age identity (or a remote config with --server).
+    /// Create the config, a new age identity and an empty vault (or a remote config with --server).
     Init {
         /// Write a remote config pointing at this server URL; no identity is created.
         #[arg(long, value_name = "URL")]
@@ -58,7 +56,7 @@ enum Cmd {
     List,
     /// Show one entry's metadata and key names, never its values.
     Describe { name: String },
-    /// Create or replace an entry's values, read from stdin as KEY=VALUE lines.
+    /// Create or replace an entry's values, read from stdin: KEY=VALUE lines, or with --key KEY all of stdin as one value.
     Set {
         name: String,
         /// Store all of stdin (minus one trailing newline) as this single key.
@@ -92,12 +90,15 @@ enum Cmd {
         #[arg(last = true, required = true)]
         command: Vec<OsString>,
     },
-    /// Render a template (`secrets["NAME"].KEY`) to stdout, which must be redirected to a file.
+    /// Render a template (`secrets["NAME"].KEY`) to a 0600 file that replaces FILE atomically.
     Render {
         template: PathBuf,
         /// Entry the template may read; repeat for several.
         #[arg(long, required = true)]
         allow: Vec<String>,
+        /// The file to write; its directory must exist.
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
     },
     /// Copy stdin to stdout with every known value masked.
     Scrub,
@@ -259,7 +260,11 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
             eprintln!("removed {name}");
         }
         Cmd::Run { env, command } => return run_child(backend, &env, &command),
-        Cmd::Render { template, allow } => render(backend, &template, allow)?,
+        Cmd::Render {
+            template,
+            allow,
+            output,
+        } => render(backend, &template, allow, &output)?,
         Cmd::Scrub => {
             let fetched = backend.fetch(Purpose::Scrub, &Selection::All)?;
             masker(&fetched).copy(io::stdin().lock(), io::stdout().lock())?;
@@ -391,12 +396,14 @@ fn pump(masker: &Masker, mut from: impl Read, to: impl Write) {
     }
 }
 
-fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>) -> Result<()> {
-    let out = File::from(io::stdout().as_fd().try_clone_to_owned()?);
-    if !out.metadata()?.is_file() {
-        bail!("stdout must be redirected to a file: agentsafe render TEMPLATE --allow NAME > FILE");
+fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>, output: &Path) -> Result<()> {
+    let dir = match output.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    if !dir.is_dir() {
+        bail!("{} does not exist: create it first", dir.display());
     }
-    out.set_permissions(Permissions::from_mode(0o600))?;
     let source = fs::read_to_string(template)
         .with_context(|| format!("cannot read {}", template.display()))?;
     let fetched = backend.fetch(Purpose::Render, &Selection::Names(allow))?;
@@ -429,8 +436,9 @@ fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>) -> Result<
             )
         })?;
     let rendered = Zeroizing::new(rendered);
-    (&out).write_all(rendered.as_bytes())?;
-    Ok(())
+    // A new 0600 file renamed over FILE: a reader of the old file never sees the values, and
+    // the mode is right before anything is written.
+    write_atomic(output, rendered.as_bytes())
 }
 
 fn verify_import(backend: &dyn Backend, dir: &Path) -> Result<ExitCode> {

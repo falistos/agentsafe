@@ -7,17 +7,20 @@ use anyhow::{Context, Result, bail};
 use secrecy::ExposeSecret;
 
 use crate::config::Config;
+use crate::vault::Store;
 
-/// Creates the config directory (0700) and the config; for a local setup also a new age identity.
-/// Neither file is ever overwritten, and nothing is written if one of them exists.
+/// Creates the config directory (0700) and the config; for a local setup also a new age identity
+/// and an empty vault. No file is ever overwritten, and nothing is written if one of them exists.
 pub fn init(server: Option<String>) -> Result<()> {
     let config = std::path::absolute(Config::path()?)?;
     let dir = config.parent().unwrap_or(Path::new("."));
     let identity = dir.join("identity.txt");
+    let vault = dir.join("vault.age");
 
     let mut targets = vec![&config];
     if server.is_none() {
         targets.push(&identity);
+        targets.push(&vault);
     }
     for path in targets {
         if path.try_exists()? {
@@ -50,6 +53,7 @@ pub fn init(server: Option<String>) -> Result<()> {
         key.to_string().expose_secret()
     );
     write_new(&identity, file.as_bytes())?;
+    Store::new(dir, identity.clone(), Vec::new()).create()?;
     let text = format!(
         "{}# Extra recipients the vault is also encrypted to, e.g. an offline recovery key.\nrecipients = []\n",
         toml_assign("identity", &identity.to_string_lossy())

@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use age::{Decryptor, Encryptor, Identity, IdentityFile, Recipient};
 use anyhow::{Context, Result, anyhow, bail};
@@ -14,6 +16,9 @@ use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
 use crate::mask::MIN_LEN;
+
+/// How long a write waits for `vault.lock` before it gives up as busy.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Meta {
@@ -86,7 +91,11 @@ impl Store {
     pub fn load(&self) -> Result<Vault> {
         let file = match File::open(&self.vault) {
             Ok(f) => f,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vault::default()),
+            // Never an empty vault: `scrub` would then mask nothing.
+            Err(e) if e.kind() == ErrorKind::NotFound => bail!(
+                "no vault at {}: `agentsafe init` creates one, or restore it from a backup",
+                self.vault.display()
+            ),
             Err(e) => {
                 return Err(e).with_context(|| format!("cannot open {}", self.vault.display()));
             }
@@ -104,9 +113,15 @@ impl Store {
             .ok_or_else(|| anyhow!("{} decrypts but does not parse", self.vault.display()))
     }
 
+    /// Writes an empty vault, for `init`.
+    pub fn create(&self) -> Result<()> {
+        self.save(&Vault::default())
+    }
+
     /// Load, change and save the vault under an exclusive lock on `vault.lock`, held until the
     /// vault and the catalog are written. Nothing is saved if `change` fails. The lock is per open
     /// file, so it also serialises threads of one process; readers take none, the save is atomic.
+    /// The lock is awaited at most `LOCK_WAIT`, so a write waiting on it cannot hold up a shutdown.
     pub fn update<T>(&self, change: impl FnOnce(&mut Vault) -> Result<T>) -> Result<T> {
         let lock = OpenOptions::new()
             .write(true)
@@ -115,8 +130,21 @@ impl Store {
             .mode(0o600)
             .open(&self.lock)
             .with_context(|| format!("cannot open {}", self.lock.display()))?;
-        lock.lock()
-            .with_context(|| format!("cannot lock {}", self.lock.display()))?;
+        let deadline = Instant::now() + LOCK_WAIT;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    bail!("vault is busy ({} is locked)", self.lock.display())
+                }
+                Err(TryLockError::Error(e)) => {
+                    return Err(e).with_context(|| format!("cannot lock {}", self.lock.display()));
+                }
+            }
+        }
         let mut vault = self.load()?;
         let result = change(&mut vault)?;
         self.save(&vault)?;
@@ -125,9 +153,10 @@ impl Store {
 
     fn save(&self, vault: &Vault) -> Result<()> {
         let mut recipients = self.identity_file()?.to_recipients()?;
-        for r in &self.recipients {
+        for (i, r) in self.recipients.iter().enumerate() {
+            // Not quoted: a secret key pasted here by mistake would be printed.
             let r = age::x25519::Recipient::from_str(r)
-                .map_err(|e| anyhow!("invalid recipient {r} in config: {e}"))?;
+                .map_err(|e| anyhow!("invalid recipient #{} in the config: {e}", i + 1))?;
             recipients.push(Box::new(r));
         }
         let plain = Zeroizing::new(toml::to_string(vault)?);
@@ -139,10 +168,14 @@ impl Store {
         writer.finish()?;
         write_atomic(&self.vault, &encrypted)?;
 
-        write_atomic(
-            &self.catalog,
-            toml::to_string(&catalog_of(vault))?.as_bytes(),
-        )
+        // The vault is the commit: a failed export is repaired by the next write.
+        let exported = toml::to_string(&catalog_of(vault))
+            .map_err(anyhow::Error::from)
+            .and_then(|text| write_atomic(&self.catalog, text.as_bytes()));
+        if let Err(e) = exported {
+            eprintln!("agentsafe: warning: the change is saved, but {e:#}");
+        }
+        Ok(())
     }
 
     fn identity_file(&self) -> Result<IdentityFile<age::NoCallbacks>> {
@@ -191,8 +224,12 @@ fn expose_values<S: Serializer>(
 
 /// The temp file is created 0600 by `tempfile` and renamed over the target, so readers never see
 /// a partial file and the mode never widens.
-fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    // A bare file name has an empty parent, which cannot be opened to sync.
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let mut tmp = NamedTempFile::new_in(dir)?;
     tmp.write_all(data)?;
     tmp.as_file().sync_all()?;

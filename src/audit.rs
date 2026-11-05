@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
@@ -49,8 +49,30 @@ impl AuditLog {
         AuditLog { path }
     }
 
-    /// A single `write` per line, so concurrent appenders never interleave.
+    /// Opened before a write, so a write that could not be audited is not made.
+    pub fn open(&self) -> Result<OpenLog<'_>> {
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(&self.path)
+            .with_context(|| format!("cannot write audit log {}", self.path.display()))?;
+        Ok(OpenLog { log: self, file })
+    }
+
     pub fn append(&self, event: &Event) -> Result<()> {
+        self.open()?.append(event)
+    }
+}
+
+pub struct OpenLog<'a> {
+    log: &'a AuditLog,
+    file: File,
+}
+
+impl OpenLog<'_> {
+    /// A single `write` per line, so concurrent appenders never interleave.
+    pub fn append(mut self, event: &Event) -> Result<()> {
         let mut line = serde_json::to_vec(&Line {
             ts: jiff::Timestamp::now()
                 .strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -58,12 +80,8 @@ impl AuditLog {
             event,
         })?;
         line.push(b'\n');
-        OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(&self.path)
-            .and_then(|mut file| file.write_all(&line))
-            .with_context(|| format!("cannot write audit log {}", self.path.display()))
+        self.file
+            .write_all(&line)
+            .with_context(|| format!("cannot write audit log {}", self.log.path.display()))
     }
 }
