@@ -142,6 +142,8 @@ is audited and, with ntfy, notified, not prevented. The full list is in the [thr
 
 ## Documentation
 
+- [Move a secrets directory](docs/migrate.md): what to import, what stays a file, how to check before
+  deleting.
 - [Deploy](docs/deploy.md): `agentsafe serve` under systemd, Tailscale Serve and policy, backups.
 - [Design](docs/design.md): the vault, the audit log, grants, the API and the admin UI.
 - [Threat model](docs/threat-model.md): assets, actors, what each layer stops and does not.
