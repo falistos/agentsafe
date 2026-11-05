@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/falistos/agentsafe"
 keywords = ["secrets", "age", "ai-agents", "cli", "vault"]
 categories = ["command-line-utilities", "cryptography"]
+exclude = [".github/"]
 
 [dependencies]
 age = "0.12.1"
