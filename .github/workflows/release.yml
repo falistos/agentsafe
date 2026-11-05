@@ -86,6 +86,8 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
           GH_TOKEN: ${{ github.token }}
+          # No checkout in this job: gh needs the repository named.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -eu
           cd dist
