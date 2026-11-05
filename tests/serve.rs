@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -666,7 +666,9 @@ fn the_socket_is_private_replaces_a_stale_one_and_goes_away_on_sigterm() {
     let home = Home::local();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("agentsafe.sock");
-    drop(UnixListener::bind(&socket).unwrap());
+    // A datagram socket file: a stream client can never connect to it, even while a child forked
+    // by a parallel test still holds the descriptor, as a closed listener's could on Linux.
+    drop(UnixDatagram::bind(&socket).unwrap());
     assert!(
         UnixStream::connect(&socket).is_err(),
         "the stale socket answers"
@@ -676,11 +678,22 @@ fn the_socket_is_private_replaces_a_stale_one_and_goes_away_on_sigterm() {
     let meta = fs::symlink_metadata(&socket).unwrap();
     assert!(meta.file_type().is_socket());
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-    let mut entries: Vec<String> = fs::read_dir(dir.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    entries.sort();
+    // The socket answers as soon as it is renamed into place; the staging directory it was bound
+    // in is removed right after, so give that removal a moment.
+    let listing = || {
+        let mut entries: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        entries.sort();
+        entries
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut entries = listing();
+    while entries.len() > 2 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+        entries = listing();
+    }
     assert_eq!(entries, ["agentsafe.sock", "agentsafe.sock.lock"]);
     let lock = dir.path().join("agentsafe.sock.lock");
     assert_eq!(
