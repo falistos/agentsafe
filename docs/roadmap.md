@@ -1,24 +1,43 @@
 # Roadmap
 
-## Phase 1 (this release)
+## Done
 
-Local CLI that reads the vault directly: `init`, `list`, `describe`, `set`, `import`, `edit`, `rm`,
-`run` with masked pipes, `render`, `scrub`, `verify-import`, and a local `audit.jsonl`.
+- Local CLI on an age vault: `init`, `list`, `describe`, `set`, `import`, `edit`, `rm`, `run` with
+  masked output, `render`, `scrub`, `verify-import`.
+- Streamed masking of raw values, base64, hex, JSON as `serde_json` writes it and percent-encoding
+  with upper-case hex.
+- Writes under `vault.lock`; the catalog derived from the vault, `catalog.toml` an export only.
+- An audit log of value fetches, writes and refused requests (successful catalog reads are not
+  logged).
+- The `Backend` seam, with a local and a remote implementation.
+- `agentsafe serve` on a 0600 Unix socket behind `tailscale serve --accept-app-caps`, with
+  per-entry grants from the tailnet policy, a CSRF header on the API, `<socket>.lock` and a 5 s
+  shutdown grace.
+- The admin web UI: metadata, write-only values, creation, deletion, reveal with a reason and an
+  optional ntfy notification, and the audit view.
 
-## Phase 2: daemon and web UI
+## Left
 
-- `agentsafe serve` daemon under launchd: decrypts the vault once, serves the CLI over a 0600 Unix socket
-  and checks the caller with `peer_cred`. The CLI and the `PostToolUse` hook stop holding the
-  identity themselves.
-- Caller identity on the tailnet with Tailscale `WhoIs` through the LocalAPI; per-tag policy
-  (`policy.toml`) for tagged nodes, full UI for the owner's user nodes only.
-- Append-only audit log (`audit.jsonl`): caller, action, entry, result; never a value.
-- Web UI on the tailnet IP (no proxy in front, so the peer address stays real): list, metadata
-  editing, add, reveal with a mandatory reason, an audit line and a ntfy notification.
-- `agentsafe run --interactive` through a pty, `export` to regenerate `~/.secrets` byte for byte, and
-  `export --check`.
+- Masking of more spellings: lower-case percent escapes and JSON `\uXXXX` escapes of non-ASCII
+  values ([#9](https://github.com/falistos/agentsafe/issues/9)).
+- `run` through a pty, for interactive commands: today the child's stdout and stderr are pipes.
+- `export`, to regenerate an env file from the vault, and `export --check`, to report drift
+  without printing values.
+- An agent hook that pipes tool output through `agentsafe scrub` before the agent reads it.
+- A test on a real tailnet: Serve's headers, the policy example and the unit file of
+  [deploy.md](deploy.md).
+- UI security headers on authorization refusals
+  ([#7](https://github.com/falistos/agentsafe/issues/7)).
 
-## Phase 3: svc1
+## Later: short-lived credentials
 
-Move the daemon to svc1, add its identity as a vault recipient, serve `render` to other hosts under
-their tag policy, and remove the keys from the mini.
+The server keeps a root credential and hands the agent a short-lived one minted at fetch time, like
+the dynamic secrets of HashiCorp Vault, so a leaked value matters little. It fits the current API:
+`fetch` would return the minted value in place of a stored one.
+
+Candidate providers, each to be verified before any work:
+
+- GitHub App installation tokens, which expire after 1 hour.
+- Tailscale OAuth client access tokens, which expire after 1 hour.
+- Cloudflare API tokens created with an expiry.
+- OVH: to check.
