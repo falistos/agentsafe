@@ -3,14 +3,15 @@
 mod ui;
 
 use std::collections::BTreeMap;
-use std::fs::{self, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
 use std::future::poll_fn;
 use std::io::ErrorKind;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use axum::Router;
@@ -24,6 +25,7 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
+use tokio::sync::oneshot;
 
 use crate::backend::{
     Backend, Caller, Exposed, LocalBackend, MetaPatch, Purpose, Put, Refusal, Selection, Values,
@@ -33,6 +35,8 @@ use crate::policy::{self, Action, Rights};
 use crate::vault::{Catalog, Store, validate_name};
 
 const BODY_LIMIT: usize = 64 * 1024;
+/// How long in-flight requests may run after SIGTERM or SIGINT.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -62,6 +66,8 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
         Store::new(&dir, identity, recipients),
         &dir,
     ));
+    // Held until the socket is removed: only its holder touches the socket path.
+    let _lock = lock_socket(&socket)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -71,9 +77,26 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
         let int = signal(SignalKind::interrupt())?;
         let listener = bind(&socket)?;
         eprintln!("agentsafe: serving on {}", socket.display());
-        let served = axum::serve(listener, app(backend))
-            .with_graceful_shutdown(shutdown(term, int))
-            .await;
+        let (stop, stopped) = oneshot::channel::<()>();
+        let server = axum::serve(listener, app(backend)).with_graceful_shutdown(async {
+            let _ = stopped.await;
+        });
+        let mut server = pin!(server.into_future());
+        let served = tokio::select! {
+            served = &mut server => served,
+            () = shutdown(term, int) => {
+                let _ = stop.send(());
+                // A stalled request is cut after the grace period. A write runs whole inside
+                // `spawn_blocking` under `vault.lock`, so nothing committed is lost.
+                match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
+                    Ok(served) => served,
+                    Err(_) => {
+                        eprintln!("agentsafe: cut the requests still open after {SHUTDOWN_GRACE:?}");
+                        Ok(())
+                    }
+                }
+            }
+        };
         let removed = fs::remove_file(&socket);
         served.context("server failed")?;
         removed.with_context(|| format!("cannot remove {}", socket.display()))
@@ -90,14 +113,37 @@ fn socket_path(flag: Option<PathBuf>, serve: &Serve, dir: &Path) -> PathBuf {
         .unwrap_or_else(|| dir.join("agentsafe.sock"))
 }
 
+/// An exclusive lock on `<socket>.lock`, refused while another server holds it.
+fn lock_socket(socket: &Path) -> Result<File> {
+    let mut path = socket.as_os_str().to_owned();
+    path.push(".lock");
+    let path = PathBuf::from(path);
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => bail!(
+            "{} is in use by another agentsafe serve (it holds {})",
+            socket.display(),
+            path.display()
+        ),
+        Err(TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("cannot lock {}", path.display()))
+        }
+    }
+}
+
 /// Binds inside a fresh 0700 directory, narrows the socket to 0600 and renames it into place,
-/// so the socket is never reachable with wider permissions.
+/// so the socket is never reachable with wider permissions. The caller holds the socket lock, so
+/// a socket already at the path is stale.
 fn bind(path: &Path) -> Result<UnixListener> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_socket() => {
-            if UnixStream::connect(path).is_ok() {
-                bail!("{} is in use by a running server", path.display());
-            }
             fs::remove_file(path)
                 .with_context(|| format!("cannot remove stale socket {}", path.display()))?;
         }

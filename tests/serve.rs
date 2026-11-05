@@ -160,13 +160,42 @@ impl Server {
     }
 
     fn stop(&mut self) -> ExitStatus {
-        let mut child = self.child.take().unwrap();
-        let killed = Command::new("kill")
-            .args(["-TERM", &child.id().to_string()])
-            .status()
-            .unwrap();
-        assert!(killed.success());
-        child.wait().unwrap()
+        terminate(self.child.as_ref().unwrap());
+        self.child.take().unwrap().wait().unwrap()
+    }
+}
+
+fn terminate(child: &Child) {
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+}
+
+/// The exit status, or `None` if the child still runs after `limit`.
+fn wait_at_most(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        if Instant::now() > deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Kills the servers a failed test leaves running.
+struct Children(Vec<Child>);
+
+impl Drop for Children {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -327,9 +356,9 @@ const ROUTES: [(&str, &str, Option<&str>); 7] = [
 
 fn assert_no_value(raw: &str) {
     for value in [API_TOKEN, DB_PASSWORD, OTHER_VALUE] {
-        assert!(!raw.contains(value), "a value in {raw}");
+        assert!(!raw.contains(value), "a fixture value leaked");
         let encoded = STANDARD.encode(value);
-        assert!(!raw.contains(&encoded), "a base64 value in {raw}");
+        assert!(!raw.contains(&encoded), "a base64 fixture value leaked");
     }
 }
 
@@ -624,8 +653,17 @@ fn the_socket_is_private_replaces_a_stale_one_and_goes_away_on_sigterm() {
     let meta = fs::symlink_metadata(&socket).unwrap();
     assert!(meta.file_type().is_socket());
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-    let entries: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
-    assert_eq!(entries.len(), 1, "staging directory left behind");
+    let mut entries: Vec<String> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["agentsafe.sock", "agentsafe.sock.lock"]);
+    let lock = dir.path().join("agentsafe.sock.lock");
+    assert_eq!(
+        fs::metadata(lock).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 
     let busy = server
         .home
@@ -654,4 +692,123 @@ fn serve_needs_a_local_config() {
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("serve needs a local config"));
     assert!(!dir.path().join("s.sock").exists());
+}
+
+#[test]
+fn an_invalid_field_is_refused_without_being_echoed() {
+    let server = Server::start(Home::local());
+    let proxy = Proxy::start(&server.socket);
+    proxy.peer(
+        Some(&caps(r#"{"entries": ["*"], "actions": ["put"]}"#)),
+        Some("alice@example.com"),
+    );
+    let body = serde_json::json!({ "meta": { "rotate_by": API_TOKEN } }).to_string();
+    let (status, answer) = api(&proxy, "PUT", "/api/v1/entries/app", Some(&body), true);
+    assert_eq!(status, 400);
+    assert_no_value(&answer);
+    assert!(answer.contains("YYYY-MM-DD"));
+
+    let err = Home::remote(&proxy).fails(&["edit", "app", "--rotate-by", API_TOKEN]);
+    assert_no_value(&err);
+    assert!(err.contains("YYYY-MM-DD"));
+
+    assert_no_value(&fs::read_to_string(server.home.path("audit.jsonl")).unwrap());
+    let refused: Vec<_> = server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["via"] == "api")
+        .map(|l| (l["action"].clone(), l["entry"].clone(), l["result"].clone()))
+        .collect();
+    let edit = (
+        serde_json::json!("edit"),
+        serde_json::json!("app"),
+        serde_json::json!("error"),
+    );
+    assert_eq!(refused, [edit.clone(), edit]);
+}
+
+#[test]
+fn concurrent_starts_leave_one_server_on_the_socket() {
+    let home = Home::local();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("agentsafe.sock");
+    // The race is timing-dependent: several rounds make a regression show up reliably.
+    for round in 0..5 {
+        let mut children = Children(
+            (0..12)
+                .map(|_| {
+                    home.cmd(&["serve", "--socket", socket.to_str().unwrap()])
+                        .stdin(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .unwrap()
+                })
+                .collect(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let running = loop {
+            let running: Vec<usize> = (0..children.0.len())
+                .filter(|&i| children.0[i].try_wait().unwrap().is_none())
+                .collect();
+            if running.len() <= 1 || Instant::now() > deadline {
+                break running;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            running.len(),
+            1,
+            "round {round}: servers on one socket path"
+        );
+        let winner = running[0];
+        for (i, child) in children.0.iter_mut().enumerate() {
+            if i == winner {
+                continue;
+            }
+            assert!(!child.wait().unwrap().success());
+            let mut err = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut err)
+                .unwrap();
+            assert!(err.contains("in use"), "{err}");
+        }
+        while UnixStream::connect(&socket).is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "round {round}: the socket is not reachable"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let winner = &mut children.0[winner];
+        terminate(winner);
+        assert!(winner.wait().unwrap().success());
+        assert!(!socket.exists());
+    }
+}
+
+#[test]
+fn sigterm_cuts_a_stalled_request_after_the_grace_period() {
+    let mut server = Server::start(Home::local());
+    let mut conn = UnixStream::connect(&server.socket).unwrap();
+    let head = format!(
+        "PUT /api/v1/entries/app HTTP/1.1\r\nHost: localhost\r\nSec-Agentsafe: 1\r\n\
+         Tailscale-App-Capabilities: {}\r\nContent-Length: 200\r\n\r\n{{",
+        caps(r#"{"entries": ["*"], "actions": ["admin"]}"#)
+    );
+    conn.write_all(head.as_bytes()).unwrap();
+    // Let the handler start waiting on the rest of the body.
+    thread::sleep(Duration::from_millis(200));
+
+    let child = server.child.as_mut().unwrap();
+    terminate(child);
+    let status = wait_at_most(child, Duration::from_secs(8));
+    assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    assert!(!server.socket.exists());
+    server.child = None;
+    drop(conn);
 }

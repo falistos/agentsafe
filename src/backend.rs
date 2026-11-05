@@ -93,8 +93,9 @@ impl MetaPatch {
         let rotate_by = match self.rotate_by {
             None => None,
             Some(d) if d.is_empty() => Some(None),
+            // The rejected text is not quoted: it reaches API answers and the audit log.
             Some(d) => Some(Some(Date::from_str(&d).map_err(|_| {
-                Refusal::Invalid(format!("invalid rotate-by {d:?}: use YYYY-MM-DD"))
+                Refusal::Invalid("invalid rotate-by: use YYYY-MM-DD".into())
             })?)),
         };
         if let Some(v) = self.description {
