@@ -20,11 +20,10 @@
 
 - **The agent works with names, not values.** No command prints a value: `list` and `describe` show metadata,
   `set` and `import` read stdin or a file, never arguments. `run` and `render` hand values to a child or a 0600 file.
-- **Masked output.** `run` and `scrub` turn a value into `***NAME***` in these spellings: raw bytes, base64, hex,
-  JSON as `serde_json` writes it, percent-encoding with upper-case hex. Others pass unmasked ([coverage](#masking)).
-- **Audited.** Value fetches, writes and refused requests are audited; no value is released when its audit line
-  cannot be written. Successful `list` and `describe`, which return no value, are not logged, nor is a `scrub` or
-  `verify-import` that fails because the vault cannot be loaded.
+- **Masked output.** `run` and `scrub` turn a value into `***NAME***`, raw or base64, hex, JSON- or
+  percent-encoded. Other spellings pass unmasked ([exact coverage](#masking)).
+- **Audited.** Value fetches, writes and refused requests go to an append-only log, and no value leaves without
+  its line. Reads that return no value are not logged ([what is logged](docs/design.md#audit)).
 - **Remote hosts through Tailscale.** `agentsafe serve` behind `tailscale serve` gives each host the entries and
   actions its tailnet grants allow. Values are injected and masked on the client.
 - **A small web UI** for owners with `admin`: metadata, write-only values, a reveal that needs a reason and can
@@ -51,7 +50,7 @@ echo example-token-0123456789 | agentsafe set github --key TOKEN --tag ci --desc
 agentsafe list
 agentsafe run --env github:TOKEN=GH_TOKEN -- printenv GH_TOKEN
 echo 'GH_TOKEN={{ secrets["github"].TOKEN }}' > app.env.j2
-agentsafe render app.env.j2 --allow github > app.env
+agentsafe render app.env.j2 --allow github -o app.env
 agentsafe scrub < app.env
 ```
 
@@ -67,7 +66,7 @@ agentsafe scrub < app.env
 
 | Command | Does |
 |---|---|
-| `agentsafe init [--server URL]` | Creates the config and, without `--server`, an age identity. |
+| `agentsafe init [--server URL]` | Creates the config and, without `--server`, an age identity and an empty vault. Never overwrites. |
 | `agentsafe list` | Entries with key count, owner, rotation date, tags, description. |
 | `agentsafe describe NAME` | One entry's metadata and key names, and which keys are too short to mask. |
 | `agentsafe set NAME [--key KEY]` | Stores values read from stdin: `KEY=VALUE` lines, or all of stdin (minus one trailing newline) as `KEY`. |
@@ -75,7 +74,7 @@ agentsafe scrub < app.env
 | `agentsafe edit NAME` | Changes metadata only. Needs at least one metadata flag. |
 | `agentsafe rm NAME` | Deletes an entry. |
 | `agentsafe run --env NAME[:KEY[=VAR]] … -- CMD ARGS` | Runs `CMD` with the values in its environment, its stdout and stderr masked. Exits with the child's code. |
-| `agentsafe render TEMPLATE --allow NAME … > FILE` | Renders a minijinja template where `secrets["NAME"].KEY` reads allowed entries. Refuses a stdout that is not a regular file and makes the file 0600. |
+| `agentsafe render TEMPLATE --allow NAME … -o FILE` | Renders a minijinja template where `secrets["NAME"].KEY` reads allowed entries into a new 0600 file that replaces `FILE` atomically. |
 | `agentsafe scrub` | Copies stdin to stdout with the values masked. |
 | `agentsafe verify-import DIR` | Compares each file of `DIR` with the entry imported from it by SHA-256 fingerprint: `OK`, `MISMATCH` or `NOT IMPORTED`; exits 1 unless all are `OK`. |
 | `agentsafe serve [--socket PATH]` | Serves the local vault over HTTP on a Unix socket for `tailscale serve`. |
@@ -99,13 +98,13 @@ These spellings of a value are covered, and only these:
 - the raw bytes;
 - base64, standard and URL-safe, at the three byte alignments a value can have inside a larger blob;
 - hexadecimal, lower case and upper case;
-- JSON as `serde_json` writes it: `"` and `\` escaped with a backslash, control characters as `\n`, `\t` and the
-  like or `\u00XX`, every other character as is, non-ASCII included;
-- percent-encoding with upper-case hex: every byte except `A-Z a-z 0-9 - . _ ~` as `%XX`.
+- JSON as `serde_json` writes it (`"` and `\` escaped with a backslash, control characters as `\n`, `\t` and the
+  like or `\u00XX`, every other character as is), also with non-ASCII characters as lower-case `\uXXXX`
+  (surrogate pairs above U+FFFF, as Python's `json.dumps` writes them), with `/` as `\/`, or both;
+- percent-encoding with upper- or lower-case hex: every byte except `A-Z a-z 0-9 - . _ ~` as `%XX`.
 
-Other spellings of the same text pass unmasked, for example JSON with `\uXXXX` escapes for non-ASCII characters
-(the default of Python's `json.dumps`) or `\/` for `/`, percent escapes with lower-case hex (`%2f`), `+` for a
-space, or a URL encoder that leaves `/` or `:` as is.
+Other spellings of the same text pass unmasked, for example upper-case `\uXXXX` escapes, `+` for a space, or a
+URL encoder that leaves `/` or `:` as is.
 
 `run` does not mask a value of another entry that the child reads elsewhere, for example from a file or its own
 `agentsafe` call; pipe such output through `agentsafe scrub`.
