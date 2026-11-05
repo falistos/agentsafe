@@ -17,13 +17,18 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::str::FromStr;
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use minijinja::syntax::SyntaxConfig;
 use minijinja::{Environment, UndefinedBehavior};
+use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, getpgid, getpgrp, kill_process, waitid};
+use rustix::termios::tcgetpgrp;
 use secrecy::{ExposeSecret, SecretString};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use signal_hook::iterator::Signals;
 use zeroize::Zeroizing;
 
 use crate::backend::{
@@ -395,21 +400,64 @@ fn run_child(backend: &dyn Backend, specs: &[EnvSpec], command: &[OsString]) -> 
         }
     }
     let masker = masker(&fetched);
+    // Installed before the spawn, so a signal sent right after it is not lost.
+    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGQUIT])?;
     let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot run {}", command[0].to_string_lossy()))?;
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
-    thread::scope(|s| {
+    let pid = Pid::from_raw(i32::try_from(child.id())?).expect("a child pid is not 0");
+    let handle = signals.handle();
+    let exited = Mutex::new(false);
+    let status = thread::scope(|s| {
         s.spawn(|| pump(&masker, stdout, io::stdout()));
         s.spawn(|| pump(&masker, stderr, io::stderr()));
-    });
-    let status = child.wait()?;
+        s.spawn(|| forward_signals(&mut signals, pid, &exited));
+        // Wait for the exit without reaping, so that the pid stays ours while signals are
+        // forwarded: once it is reaped it can be reused.
+        while let Err(rustix::io::Errno::INTR) = waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+        ) {}
+        *exited.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        handle.close();
+        child.wait()
+    })?;
     let code = status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
     // Exit codes are 0-255 and signals add 128 to a number under 128.
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)))
+}
+
+/// Sends the signals this process receives on to the child, until `exited` is set.
+fn forward_signals(signals: &mut Signals, child: Pid, exited: &Mutex<bool>) {
+    for raw in signals.forever() {
+        let Some(signal) = Signal::from_named_raw(raw) else {
+            continue;
+        };
+        let exited = exited.lock().unwrap_or_else(PoisonError::into_inner);
+        if *exited || (matches!(signal, Signal::INT | Signal::QUIT) && child_shares_terminal(child))
+        {
+            continue;
+        }
+        let _ = kill_process(child, signal);
+    }
+}
+
+/// Whether the terminal that sends SIGINT and SIGQUIT to the foreground process group signaled
+/// the child as well: forwarding the signal would deliver it twice, and a program that quits on
+/// its second Ctrl-C would not survive that.
+fn child_shares_terminal(child: Pid) -> bool {
+    let ours = getpgrp();
+    getpgid(Some(child)) == Ok(ours)
+        && [
+            tcgetpgrp(io::stdin()),
+            tcgetpgrp(io::stdout()),
+            tcgetpgrp(io::stderr()),
+        ]
+        .contains(&Ok(ours))
 }
 
 /// If our own output closes, keep draining the child so it is not blocked on a full pipe.
