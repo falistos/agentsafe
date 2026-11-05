@@ -1,44 +1,69 @@
-# agentsafe
+<p align="center"><img src="docs/assets/logo.svg" width="120" alt=""></p>
 
-A secrets manager for AI agents. The agent works with entry names and metadata; values only reach
-child processes and rendered files, the output it reads is masked, and value fetches, writes and
-refused requests are audited. Successful `list` and `describe`, which return no value, are not
-logged, nor is a `scrub` or `verify-import` that fails because the vault cannot be loaded; no
-value is released when its audit line cannot be written.
+<h1 align="center">agentsafe</h1>
 
-Values live in one age-encrypted file. The CLI reads it directly on the vault host (local mode),
-or through an `agentsafe serve` on the tailnet that checks each caller's Tailscale grants (remote
-mode).
+<p align="center">A secrets manager for AI agents: names for the agent, values for the commands it runs.</p>
+
+<p align="center">
+  <a href="https://github.com/falistos/agentsafe/actions/workflows/ci.yml"><img src="https://github.com/falistos/agentsafe/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/rust-1.89%2B-orange" alt="Rust 1.89+">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey" alt="Platforms: Linux, macOS">
+</p>
+
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/demo-dark.svg">
+  <img src="docs/assets/demo-light.svg" width="720" alt="agentsafe list shows the github entry's metadata; agentsafe run prints its token as ***github***, raw and in base64">
+</picture></p>
+
+<p align="center"><i>The child process gets the token. Its output, what the agent reads, shows <code>***github***</code>.</i></p>
+
+- **The agent works with names, not values.** No command prints a value: `list` and `describe` show metadata,
+  `set` and `import` read stdin or a file, never arguments. `run` and `render` hand values to a child or a 0600 file.
+- **Masked output.** `run` and `scrub` turn a value into `***NAME***` in these spellings: raw bytes, base64, hex,
+  JSON as `serde_json` writes it, percent-encoding with upper-case hex. Others pass unmasked ([coverage](#masking)).
+- **Audited.** Value fetches, writes and refused requests are audited; no value is released when its audit line
+  cannot be written. Successful `list` and `describe`, which return no value, are not logged, nor is a `scrub` or
+  `verify-import` that fails because the vault cannot be loaded.
+- **Remote hosts through Tailscale.** `agentsafe serve` behind `tailscale serve` gives each host the entries and
+  actions its tailnet grants allow. Values are injected and masked on the client.
+- **A small web UI** for owners with `admin`: metadata, write-only values, a reveal that needs a reason and can
+  send an ntfy notification, the audit view. No JavaScript.
+- **One binary, one encrypted file.** CLI, server and UI ship as one binary; values live in one age file.
 
 ## Install
 
-Release archives, once a release is published, are on the
-[releases page](https://github.com/falistos/agentsafe/releases) as
-`agentsafe-<tag>-<target>.tar.gz` for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
-and `aarch64-apple-darwin`, with a `SHA256SUMS` file.
-
-From source (Rust 1.89 or later):
+Once a release is published, the [releases page](https://github.com/falistos/agentsafe/releases) has archives for
+Linux (`x86_64` and `aarch64`, musl) and macOS (`aarch64`) with a `SHA256SUMS` file. Until then, with Rust 1.89+:
 
 ```sh
-cargo install --git https://github.com/falistos/agentsafe
+cargo install --locked --git https://github.com/falistos/agentsafe
 ```
 
-## Quickstart (local mode)
+## Quick start
+
+In an empty directory, with a throwaway vault and a fake token:
 
 ```sh
-agentsafe init                                     # config, age identity
-agentsafe set github --key TOKEN < token.txt       # or KEY=VALUE lines on stdin
-agentsafe list                                     # names and metadata, never values
-agentsafe run --env github:TOKEN=GH_TOKEN -- gh api user   # value in the child, output masked
-agentsafe render app.env.j2 --allow github > app.env       # value in a 0600 file
+export AGENTSAFE_CONFIG=$PWD/demo/config.toml
+agentsafe init
+echo example-token-0123456789 | agentsafe set github --key TOKEN --tag ci --description "GitHub API"
+agentsafe list
+agentsafe run --env github:TOKEN=GH_TOKEN -- printenv GH_TOKEN
+echo 'GH_TOKEN={{ secrets["github"].TOKEN }}' > app.env.j2
+agentsafe render app.env.j2 --allow github > app.env
+agentsafe scrub < app.env
 ```
 
-`init` creates `~/.config/agentsafe/` (0700) with `config.toml` and `identity.txt` (0600) and
-never overwrites them. `$AGENTSAFE_CONFIG` overrides the config path. In local mode the owner's
-agents on the vault host need no grant, header or reason: they act as the owner, and the audit log
-records their fetches and writes.
+`list` shows the entry without its value, `run` prints `***github***`, `render` writes the value into `app.env`
+(0600) and `scrub` masks it again. For real use, open a shell without the `export` (the config then lives in
+`~/.config/agentsafe/`), run `agentsafe init`, and pipe a real token in, never as an argument:
+`gh auth token | agentsafe set github --key TOKEN`, then `agentsafe run --env github:TOKEN=GH_TOKEN -- gh api user`.
 
 ## Commands
+
+<details>
+<summary>Every command, in one table</summary>
 
 | Command | Does |
 |---|---|
@@ -53,76 +78,75 @@ records their fetches and writes.
 | `agentsafe render TEMPLATE --allow NAME … > FILE` | Renders a minijinja template where `secrets["NAME"].KEY` reads allowed entries. Refuses a stdout that is not a regular file and makes the file 0600. |
 | `agentsafe scrub` | Copies stdin to stdout with the values masked. |
 | `agentsafe verify-import DIR` | Compares each file of `DIR` with the entry imported from it by SHA-256 fingerprint: `OK`, `MISMATCH` or `NOT IMPORTED`; exits 1 unless all are `OK`. |
-| `agentsafe serve [--socket PATH]` | Serves the local vault over HTTP on a Unix socket for `tailscale serve`. See [docs/deploy.md](docs/deploy.md). |
+| `agentsafe serve [--socket PATH]` | Serves the local vault over HTTP on a Unix socket for `tailscale serve`. |
 
-`set`, `import` and `edit` take `--description`, `--owner`, `--rotate-by YYYY-MM-DD`, and
-repeatable `--used-by` and `--tag`; an empty value clears the field (`--tag ''`). Values are never
-accepted as arguments.
+`set`, `import` and `edit` take `--description`, `--owner`, `--rotate-by YYYY-MM-DD`, and repeatable `--used-by`
+and `--tag`; an empty value clears the field (`--tag ''`). `$AGENTSAFE_CONFIG` overrides the config path.
+
+</details>
 
 ## Masking
 
-`run` masks the values of the entries named in `--env`, every key of them even when only one key
-is injected. `scrub` masks every entry the caller may get: all of them in local mode, those it has
-`get` on in remote mode. A match becomes `***NAME***`. Matching is streamed with a hold-back, so a
-value split across reads is still masked. These spellings of a value are covered, and only these:
+`run` masks the values of the entries named in `--env`, every key of them even when only one key is injected.
+`scrub` masks every entry the caller may get: all of them in local mode, those it has `get` on in remote mode.
+Matching is streamed, so a value split across reads is still masked.
+
+<details>
+<summary>The spellings covered, and the gaps</summary>
+
+These spellings of a value are covered, and only these:
 
 - the raw bytes;
-- base64, standard and URL-safe, at the three byte alignments a value can have inside a larger
-  blob;
+- base64, standard and URL-safe, at the three byte alignments a value can have inside a larger blob;
 - hexadecimal, lower case and upper case;
-- JSON as `serde_json` writes it: `"` and `\` escaped with a backslash, control characters as `\n`,
-  `\t` and the like or `\u00XX`, every other character as is, non-ASCII included;
+- JSON as `serde_json` writes it: `"` and `\` escaped with a backslash, control characters as `\n`, `\t` and the
+  like or `\u00XX`, every other character as is, non-ASCII included;
 - percent-encoding with upper-case hex: every byte except `A-Z a-z 0-9 - . _ ~` as `%XX`.
 
-Other spellings of the same text pass unmasked, for example JSON with `\uXXXX` escapes for
-non-ASCII characters (the default of Python's `json.dumps`) or `\/` for `/`, percent escapes with
-lower-case hex (`%2f`), `+` for a space, or a URL encoder that leaves `/` or `:` as is.
+Other spellings of the same text pass unmasked, for example JSON with `\uXXXX` escapes for non-ASCII characters
+(the default of Python's `json.dumps`) or `\/` for `/`, percent escapes with lower-case hex (`%2f`), `+` for a
+space, or a URL encoder that leaves `/` or `:` as is.
 
-`run` does not mask a value of another entry that the child reads elsewhere, for example from a
-file or its own `agentsafe` call; pipe such output through `agentsafe scrub`.
+`run` does not mask a value of another entry that the child reads elsewhere, for example from a file or its own
+`agentsafe` call; pipe such output through `agentsafe scrub`.
 
-Values and encoded forms shorter than 6 bytes are not masked: they occur in ordinary output and
-masking them would corrupt it. `set` warns about them and `describe` lists them.
+Values and encoded forms shorter than 6 bytes are not masked: they occur in ordinary output and masking them
+would corrupt it. `set` warns about them and `describe` lists them.
+
+</details>
 
 ## Remote mode
 
-`agentsafe serve` runs on the vault host behind `tailscale serve --accept-app-caps`, which tells it
-who the caller is and which grants the tailnet policy gives them. On another host,
-`agentsafe init --server https://host.tailnet.ts.net` writes a config with no identity: every
-command then goes to the server, and values are injected and masked on the client. Owners with
-`admin` also get a small web UI (metadata, write-only value replacement, reveal with a reason and
-an optional ntfy notification, audit view).
-
-Setup, unit file and policy example: [docs/deploy.md](docs/deploy.md). Design and API:
-[docs/design.md](docs/design.md). Threat model: [docs/threat-model.md](docs/threat-model.md).
+On the vault host, `agentsafe serve` listens on a 0600 Unix socket behind `tailscale serve --accept-app-caps`,
+which tells it who the caller is and what the tailnet policy grants. On an agent host, `agentsafe init --server
+https://host.tailnet.ts.net` writes a config with no identity: every command then goes to the server, which checks
+the grants and audits each fetch. Setup, systemd unit and policy example: [docs/deploy.md](docs/deploy.md).
 
 ## What it does not protect against
 
-`agentsafe` prevents accidents: a value pasted into a transcript, a `.env` file read by mistake. It
-is not a sandbox. An agent determined to see a value can still get it, for example by:
+`agentsafe` prevents accidents: a value pasted into a transcript, a `.env` file read by mistake. It is not a
+sandbox. An agent determined to see a value can still get it, for example by:
 
-- transforming it before printing: hashing, encrypting, reversing, printing it character by
-  character, or an encoding or spelling not listed above;
-- writing it to a file or sending it over the network from inside `agentsafe run`, then reading it
-  back outside;
-- `agentsafe render` to a file, then reading the file;
+- transforming it before printing: hashing, reversing, an encoding not listed under [Masking](#masking);
+- writing it to a file or the network from inside `agentsafe run`, or reading the file `render` wrote;
 - in local mode, reading the age identity, which any process running as the same user can do.
 
-In remote mode:
+In remote mode, any process on a host allowed to `get` an entry can use that host's grants; root and the server
+user on the vault host can read every value, and `tailscaled` sees those it proxies; an `admin` reveal in the UI
+is audited and, with ntfy, notified, not prevented. The full list is in the [threat model](docs/threat-model.md).
 
-- a host allowed to `get` an entry holds its values in memory while a command runs, and any process
-  there can call the API with that host's grants: the server sees a tailnet node, not a process;
-- whoever runs as the server user or as root on the vault host can read every value, and
-  `tailscaled` there terminates TLS and sees the values it proxies;
-- a holder of `admin` can reveal values in the UI; the reveal is audited and, with ntfy, notified,
-  not prevented.
+## Documentation
+
+- [Deploy](docs/deploy.md): `agentsafe serve` under systemd, Tailscale Serve and policy, backups.
+- [Design](docs/design.md): the vault, the audit log, grants, the API and the admin UI.
+- [Threat model](docs/threat-model.md): assets, actors, what each layer stops and does not.
+- [Roadmap](docs/roadmap.md): what is done and what is left.
+
+## Contributing
+
+`make gate` runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, as CI does
+([CONTRIBUTING.md](CONTRIBUTING.md)). Report a vulnerability privately, as [SECURITY.md](SECURITY.md) explains.
 
 ## License
 
 MIT OR Apache-2.0, at your option: [LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE).
-
-## Development
-
-```sh
-make gate   # cargo fmt --check, cargo clippy -D warnings, cargo test
-```

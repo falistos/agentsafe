@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 210" width="720" height="210" role="img" aria-labelledby="t">
+  <title id="t">agentsafe list shows names and metadata; agentsafe run prints the token as ***github***, raw and in base64</title>
+  <rect x="0.5" y="0.5" width="719" height="209" rx="10" fill="#161b22" stroke="#30363d"/>
+  <circle cx="20" cy="18" r="5" fill="#30363d"/>
+  <circle cx="36" cy="18" r="5" fill="#30363d"/>
+  <circle cx="52" cy="18" r="5" fill="#30363d"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'DejaVu Sans Mono', monospace" font-size="13" fill="#e6edf3">
+    <text xml:space="preserve" x="20" y="56"><tspan fill="#9198a1">$ </tspan>agentsafe list</text>
+    <text xml:space="preserve" x="20" y="78">NAME    KEYS    OWNER   ROTATE_BY       TAGS    DESCRIPTION</text>
+    <text xml:space="preserve" x="20" y="100">github  1       -       -               ci      GitHub API</text>
+    <text xml:space="preserve" x="20" y="122"><tspan fill="#9198a1">$ </tspan>agentsafe run --env github:TOKEN=GH_TOKEN -- printenv GH_TOKEN</text>
+    <text xml:space="preserve" x="20" y="144" fill="#3ec9b4" font-weight="bold">***github***</text>
+    <text xml:space="preserve" x="20" y="166"><tspan fill="#9198a1">$ </tspan>agentsafe run --env github:TOKEN=GH_TOKEN -- sh -c 'printf %s "$GH_TOKEN" | base64'</text>
+    <text xml:space="preserve" x="20" y="188" fill="#3ec9b4" font-weight="bold">***github***</text>
+  </g>
+</svg>
