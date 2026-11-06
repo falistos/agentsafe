@@ -1683,8 +1683,14 @@ fn a_local_uid_without_a_grant_is_refused_and_audited() {
         "[[serve.grant]]\nuid = {other}\nentries = [\"*\"]\nactions = [\"admin\"]\n"
     ));
     let server = Server::start(home);
-    let err = Home::unix(&server.socket).fails(&["list"]);
-    assert!(err.contains("no grant for this uid"), "{err}");
+    let out = Home::unix(&server.socket).run(&["list"], "");
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("no grant for this uid"),
+        "{}",
+        text(&out.stderr)
+    );
     let last = server.home.audit().pop().unwrap();
     assert_eq!(last["who"], format!("uid:{}", my_uid()).as_str());
     assert_eq!(last["result"], "denied");
