@@ -16,6 +16,9 @@
   shutdown grace.
 - The admin web UI: metadata, write-only values, creation, deletion, reveal with a reason and an
   optional ntfy notification, and the audit view.
+- One-key rotation (`set NAME --key KEY`, the API's `merge`), signal forwarding in `run`, and
+  `render` refusing an allowed entry its template never reads (0.1.1).
+- A migration guide from a directory of secret files ([migrate.md](migrate.md)).
 
 ## Left
 
