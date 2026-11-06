@@ -41,6 +41,9 @@ Stops:
 - Error messages never quote a value: `.env` errors give a line number, template errors give the
   kind and the line, config errors give the line, the column and the kind, a vault that does not
   parse is reported without its content, API errors never echo the request body.
+- Every agentsafe process sets its core dump limit to 0 and, on Linux, makes itself
+  non-dumpable: the agent cannot read its memory or `/proc/PID/environ`, nor attach a debugger,
+  as the same user. A child of `run` starts with a soft core limit of 0.
 - Every value fetch and write is audited. No value is released when its audit line cannot be
   written, and no write is made when the audit log cannot be opened. Successful `list` and
   `describe` are not logged; they return no value.
@@ -58,6 +61,11 @@ Other accounts on the client or the vault host.
 
 Stops: the config directory is 0700; the config, identity, vault, catalog, lock, audit log, socket
 lock and socket are 0600. A rendered file is 0600 from its creation.
+
+On Linux, `serve` confines itself with Landlock once its socket is locked: it reads and writes
+only its config directory and its socket's directory, reads its identity and `/etc`, executes
+nothing, binds no TCP port, and cannot signal processes outside itself. Its startup line says
+whether the kernel enforces it. A flaw in the server then reaches the vault, not the host.
 
 Does not stop: root, or anything running as the owner or the server user.
 

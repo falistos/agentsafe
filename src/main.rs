@@ -3,6 +3,7 @@ mod backend;
 mod client;
 mod config;
 mod dotenv;
+mod harden;
 mod init;
 mod mask;
 mod policy;
@@ -198,6 +199,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cmd: Cmd) -> Result<ExitCode> {
+    harden::process()?;
     if let Cmd::Init { server } = cmd {
         init::init(server)?;
         return Ok(ExitCode::SUCCESS);

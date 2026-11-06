@@ -69,12 +69,16 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
     };
     let socket = socket_path(socket, &config.serve, &dir);
     let ntfy = config.serve.ntfy.as_deref().map(Arc::from);
+    // Held until the socket is removed: only its holder touches the socket path.
+    let _lock = lock_socket(&socket)?;
+    #[cfg(target_os = "linux")]
+    let sandbox = crate::harden::sandbox(&[&dir, socket_dir(&socket)], &[&identity])?;
+    #[cfg(not(target_os = "linux"))]
+    let sandbox = "not available on this system";
     let backend = Arc::new(LocalBackend::new(
         Store::new(&dir, identity, recipients),
         &dir,
     ));
-    // Held until the socket is removed: only its holder touches the socket path.
-    let _lock = lock_socket(&socket)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -83,7 +87,10 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
         let term = signal(SignalKind::terminate())?;
         let int = signal(SignalKind::interrupt())?;
         let listener = bind(&socket)?;
-        eprintln!("agentsafe: serving on {}", socket.display());
+        eprintln!(
+            "agentsafe: serving on {} (Landlock: {sandbox})",
+            socket.display()
+        );
         let (stop, stopped) = oneshot::channel::<()>();
         let server = axum::serve(listener, app(backend, &dir, ntfy)).with_graceful_shutdown(async {
             let _ = stopped.await;
@@ -117,6 +124,13 @@ fn socket_path(flag: Option<PathBuf>, serve: &Serve, dir: &Path) -> PathBuf {
                 .map(|d| PathBuf::from(d).join("agentsafe.sock"))
         })
         .unwrap_or_else(|| dir.join("agentsafe.sock"))
+}
+
+fn socket_dir(socket: &Path) -> &Path {
+    match socket.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
 }
 
 /// An exclusive lock on `<socket>.lock`, refused while another server holds it.
@@ -157,10 +171,7 @@ fn bind(path: &Path) -> Result<UnixListener> {
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("cannot inspect {}", path.display())),
     }
-    let parent = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
+    let parent = socket_dir(path);
     let tmp = tempfile::Builder::new()
         .prefix(".agentsafe-")
         .permissions(Permissions::from_mode(0o700))
