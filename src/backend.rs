@@ -9,6 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::audit::{AuditLog, Event, Outcome};
+use crate::dotenv;
 use crate::mask::{MIN_LEN, Masker};
 use crate::vault::{Catalog, Entry, Meta, Store, validate_name};
 
@@ -285,6 +286,9 @@ impl LocalBackend {
 
     fn apply_put(&self, name: &str, put: Put, expect: Expect, mode: Mode) -> Result<usize> {
         validate_name(name).map_err(|e| Refusal::Invalid(e.to_string()))?;
+        for key in put.values.iter().flat_map(BTreeMap::keys) {
+            dotenv::validate_key(key).map_err(|e| Refusal::Invalid(e.to_string()))?;
+        }
         self.store.update(|vault| {
             let present = vault.entries.contains_key(name);
             match expect {

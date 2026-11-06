@@ -77,6 +77,20 @@ fn is_key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 
+/// Every write holds to the key grammar `parse` reads, so a key never contains `=`, which
+/// `run --env NAME:KEY=VAR` splits on.
+pub fn validate_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        || key.starts_with(|c: char| c.is_ascii_digit())
+        || !key.chars().all(is_key_char)
+    {
+        bail!(
+            "invalid key {key:?}: use letters, digits, '_', '.' or '-', not starting with a digit"
+        );
+    }
+    Ok(())
+}
+
 /// SHA-256 over the sorted pairs, each field length-prefixed so that no two sets collide by
 /// concatenation.
 pub fn fingerprint<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> [u8; 32] {
