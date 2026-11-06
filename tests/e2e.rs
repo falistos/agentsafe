@@ -1499,7 +1499,9 @@ fn a_key_outside_the_dotenv_grammar_is_refused() {
     for key in ["my=key", "1abc", "a b", ""] {
         let out = home.agentsafe_stdin(&["set", "amb", "--key", key], "value-123456\n");
         assert!(!out.status.success(), "{key:?} accepted");
-        assert!(!text(&out.stderr).contains("value-123456"));
+        let stderr = text(&out.stderr);
+        assert!(!stderr.contains("value-123456"), "{stderr}");
+        assert!(key.is_empty() || !stderr.contains(key), "{stderr}");
     }
     assert_eq!(text(&home.agentsafe(&["list"]).stdout).lines().count(), 1);
 }

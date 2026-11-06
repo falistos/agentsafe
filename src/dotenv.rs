@@ -84,9 +84,8 @@ pub fn validate_key(key: &str) -> Result<()> {
         || key.starts_with(|c: char| c.is_ascii_digit())
         || !key.chars().all(is_key_char)
     {
-        bail!(
-            "invalid key {key:?}: use letters, digits, '_', '.' or '-', not starting with a digit"
-        );
+        // Not echoed: a value pasted where the key goes would land in the agent's transcript.
+        bail!("invalid key: use letters, digits, '_', '.' or '-', not starting with a digit");
     }
     Ok(())
 }
