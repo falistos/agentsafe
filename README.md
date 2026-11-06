@@ -128,7 +128,7 @@ would corrupt it. `set` warns about them and `describe` lists them.
 
 ## Remote mode
 
-On the vault host, `agentsafe serve` listens on a 0600 Unix socket behind `tailscale serve --accept-app-caps`,
+On the vault host, `agentsafe serve` listens on a Unix socket behind `tailscale serve --accept-app-caps`,
 which tells it who the caller is and what the tailnet policy grants. On an agent host, `agentsafe init --server
 https://host.tailnet.ts.net` writes a config with no identity: every command then goes to the server, which checks
 the grants and audits each fetch. An agent on the vault host itself, under its own user, uses `--server

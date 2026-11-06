@@ -97,9 +97,10 @@ sudo systemctl enable --now agentsafe
 journalctl -u agentsafe    # "agentsafe: serving on /run/agentsafe/agentsafe.sock (Landlock: enforced)"
 ```
 
-The socket is 0600 in a 0700 directory: only `agentsafe` and root (`tailscaled`) can connect. Keep
-it that way; a process that reaches the socket directly can claim any grant (see
-[design.md](design.md#why-the-socket-is-0600)).
+The socket is 0600 in a 0700 directory: only `agentsafe` and root (`tailscaled`) can connect.
+Serve's headers are believed only from `tailscaled_uid` (root by default); another process that
+reaches the socket gets the rights its uid is granted in `[[serve.grant]]`, none without one (see
+[design.md](design.md#local-peers) and section 6).
 
 ## 3. Tailscale Serve
 

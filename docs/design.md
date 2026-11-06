@@ -258,7 +258,7 @@ One JSON object per line:
 | Field | Value |
 |---|---|
 | `ts` | UTC, to the second. |
-| `who` | `local:$USER`; through the server the `Tailscale-User-Login`, else `node:<X-Forwarded-For>`, else `unknown`. |
+| `who` | `local:$USER`; through the server the `Tailscale-User-Login`, else `node:<X-Forwarded-For>`, else `unknown`; a [local peer](#local-peers) as `uid:<n>`. |
 | `via` | `local`, `api` or `ui`. |
 | `action` | `run`, `render`, `get` and `reveal` (one line per entry); `scrub` and `verify-import` (one line, no entry); `put`, `edit`, `rm`; and, for refusals only, `list`, `describe`, `audit` or `request`. |
 | `entry` | The entry, when the action has one. |
