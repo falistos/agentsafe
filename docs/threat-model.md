@@ -48,7 +48,8 @@ Stops:
 Does not stop: a spelling the masker does not cover, such as base32, upper-case `\uXXXX` escapes or
 percent-encoding of unreserved characters; a value transformed before printing, written to a file or sent over the network from
 inside `run`, read back from a rendered file, or a value of another entry that the child reads
-elsewhere (`run` does not mask it). In local mode the agent can read `identity.txt`. In remote mode
+elsewhere (`run` does not mask it). On Linux, a child's environment stays readable in
+`/proc/PID/environ` by every process of the same user while the child runs. In local mode the agent can read `identity.txt`. In remote mode
 it holds the fetched values in memory and can call the API with its host's grants.
 
 ### Other local users

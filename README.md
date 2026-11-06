@@ -2,7 +2,7 @@
 
 <h1 align="center">agentsafe</h1>
 
-<p align="center">A secrets manager for AI agents: names for the agent, values for the commands it runs.</p>
+<p align="center">A secrets manager for AI agents on your machines: names for the agent, values for the commands it runs, access from your tailnet policy.</p>
 
 <p align="center">
   <a href="https://github.com/falistos/agentsafe/actions/workflows/ci.yml"><img src="https://github.com/falistos/agentsafe/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -20,12 +20,12 @@
 
 - **The agent works with names, not values.** No command prints a value: `list` and `describe` show metadata,
   `set` and `import` read stdin or a file, never arguments. `run` and `render` hand values to a child or a 0600 file.
+- **Remote hosts through Tailscale.** `agentsafe serve` behind `tailscale serve` gives each host the entries and
+  actions its tailnet grants allow. Values are injected and masked on the client.
 - **Masked output.** `run` and `scrub` turn a value into `***NAME***`, raw or base64, hex, JSON- or
   percent-encoded. Other spellings pass unmasked ([exact coverage](#masking)).
 - **Audited.** Value fetches, writes and refused requests go to an append-only log, and no value leaves without
   its line. Reads that return no value are not logged ([what is logged](docs/design.md#audit)).
-- **Remote hosts through Tailscale.** `agentsafe serve` behind `tailscale serve` gives each host the entries and
-  actions its tailnet grants allow. Values are injected and masked on the client.
 - **A small web UI** for owners with `admin`: metadata, write-only values, a reveal that needs a reason and can
   send an ntfy notification, the audit view. No JavaScript.
 - **One binary, one encrypted file.** CLI, server and UI ship as one binary; values live in one age file.
@@ -136,6 +136,8 @@ sandbox. An agent determined to see a value can still get it, for example by:
 
 - transforming it before printing: hashing, reversing, an encoding not listed under [Masking](#masking);
 - writing it to a file or the network from inside `agentsafe run`, or reading the file `render` wrote;
+- on Linux, reading `/proc/PID/environ` of a child of `agentsafe run` while it runs, which any process of the
+  same user can do;
 - in local mode, reading the age identity, which any process running as the same user can do.
 
 In remote mode, any process on a host allowed to `get` an entry can use that host's grants; root and the server
