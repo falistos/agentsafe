@@ -244,8 +244,8 @@ line" # after
 
     #[test]
     fn keys_accept_dashes_but_not_a_leading_digit() {
-        let m = parse("hadaria-prison=v\nexport a-b.c_d=w\n").unwrap();
-        assert_eq!(m["hadaria-prison"], "v");
+        let m = parse("billing-bot=v\nexport a-b.c_d=w\n").unwrap();
+        assert_eq!(m["billing-bot"], "v");
         assert_eq!(m["a-b.c_d"], "w");
         assert!(parse("1-a=v").is_err());
         assert!(parse("-a=v").is_ok());

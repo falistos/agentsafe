@@ -1547,7 +1547,7 @@ fn keys_with_a_dash_import_and_run_under_their_own_names() {
     let file = src.path().join("bots.env");
     fs::write(
         &file,
-        "hadaria-prison=dash-key-value-1\nother-bot=dash-key-value-2\n",
+        "billing-bot=dash-key-value-1\nother-bot=dash-key-value-2\n",
     )
     .unwrap();
     let out = home.agentsafe(&["import", file.to_str().unwrap(), "--name", "bots"]);
@@ -1556,7 +1556,7 @@ fn keys_with_a_dash_import_and_run_under_their_own_names() {
     let out = home.agentsafe(&[
         "run",
         "--env",
-        "bots:hadaria-prison=T",
+        "bots:billing-bot=T",
         "--",
         "sh",
         "-c",
@@ -1564,10 +1564,10 @@ fn keys_with_a_dash_import_and_run_under_their_own_names() {
     ]);
     assert_eq!(text(&out.stdout), "same\n", "{}", text(&out.stderr));
 
-    // The shell cannot expand `$hadaria-prison`; `env` lists the variables under their own names.
+    // The shell cannot expand `$billing-bot`; `env` lists the variables under their own names.
     let out = home.agentsafe(&["run", "--env", "bots", "--", "env"]);
     let listed = text(&out.stdout);
-    assert!(listed.contains("hadaria-prison=***bots***\n"), "{listed}");
+    assert!(listed.contains("billing-bot=***bots***\n"), "{listed}");
     assert!(listed.contains("other-bot=***bots***\n"), "{listed}");
 
     let out = home.agentsafe(&["verify-import", src.path().to_str().unwrap()]);
