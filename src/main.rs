@@ -313,8 +313,9 @@ fn install_skill() -> Result<()> {
 
 fn list(backend: &dyn Backend) -> Result<()> {
     let dash = |s: Option<String>| s.filter(|s| !s.is_empty()).unwrap_or("-".into());
+    let catalog = backend.catalog()?;
     println!("NAME\tKEYS\tOWNER\tROTATE_BY\tTAGS\tDESCRIPTION");
-    for (name, e) in backend.catalog()? {
+    for (name, e) in catalog {
         println!(
             "{name}\t{}\t{}\t{}\t{}\t{}",
             e.keys.len(),

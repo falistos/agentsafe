@@ -1,9 +1,11 @@
-//! Who may do what, from the `Tailscale-App-Capabilities` header that `tailscale serve` sets.
+//! Who may do what: from the `Tailscale-App-Capabilities` header that `tailscale serve` sets, or
+//! for a local peer from the config's `[[serve.grant]]` tables.
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use crate::config::LocalGrant;
 use crate::vault::validate_name;
 
 /// The application capability the grants in the tailnet policy file use.
@@ -29,7 +31,7 @@ impl Action {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Pattern {
     Exact(String),
     /// `prefix*`; an empty prefix is `*`, every entry.
@@ -62,7 +64,7 @@ struct RawGrant {
     actions: Vec<Action>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Grant {
     entries: Vec<Pattern>,
     actions: Vec<Action>,
@@ -70,7 +72,7 @@ struct Grant {
 
 /// The union of the caller's grants: an action on an entry is allowed when one grant both
 /// matches the entry and holds or implies the action.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Rights {
     grants: Vec<Grant>,
 }
@@ -99,6 +101,10 @@ pub enum Denial {
     Malformed,
     /// The header has no valid value for [`CAP`].
     NoGrant,
+    /// A local peer whose uid has no `[[serve.grant]]`.
+    NoLocalGrant,
+    /// The kernel did not give the peer's credentials.
+    UnknownPeer,
 }
 
 impl Denial {
@@ -107,6 +113,8 @@ impl Denial {
             Denial::Missing => "no capability header",
             Denial::Malformed => "malformed capability header",
             Denial::NoGrant => "no valid agentsafe grant",
+            Denial::NoLocalGrant => "no grant for this uid",
+            Denial::UnknownPeer => "cannot identify the peer",
         }
     }
 }
@@ -141,16 +149,35 @@ fn parse_header(header: Option<&[u8]>, warnings: &mut Vec<String>) -> Result<Rig
     Ok(Rights { grants })
 }
 
+/// The rights of each uid that has `[[serve.grant]]` tables; an invalid pattern is an error.
+pub fn local(grants: &[LocalGrant]) -> Result<BTreeMap<u32, Rights>, String> {
+    let mut rights: BTreeMap<u32, Rights> = BTreeMap::new();
+    for g in grants {
+        let grant = Grant {
+            entries: patterns(&g.entries)?,
+            actions: g.actions.clone(),
+        };
+        rights
+            .entry(g.uid)
+            .or_insert_with(|| Rights { grants: Vec::new() })
+            .grants
+            .push(grant);
+    }
+    Ok(rights)
+}
+
+fn patterns(entries: &[String]) -> Result<Vec<Pattern>, String> {
+    entries
+        .iter()
+        .map(|p| Pattern::parse(p).ok_or_else(|| format!("invalid entry pattern {p:?}")))
+        .collect()
+}
+
 fn grant(value: &serde_json::Value) -> Result<Grant, String> {
     // The serde error names the offending field or variant: grant values are policy, not secrets.
     let raw = RawGrant::deserialize(value).map_err(|e| e.to_string())?;
-    let entries = raw
-        .entries
-        .iter()
-        .map(|p| Pattern::parse(p).ok_or_else(|| format!("invalid entry pattern {p:?}")))
-        .collect::<Result<_, _>>()?;
     Ok(Grant {
-        entries,
+        entries: patterns(&raw.entries)?,
         actions: raw.actions,
     })
 }

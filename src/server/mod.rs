@@ -1,4 +1,5 @@
-//! `agentsafe serve`: the vault over HTTP on a Unix socket, behind `tailscale serve`.
+//! `agentsafe serve`: the vault over HTTP on a Unix socket, behind `tailscale serve` and for
+//! local users that the config grants rights to.
 
 mod ui;
 
@@ -16,12 +17,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use axum::Router;
 use axum::body::{Body, Bytes};
+use axum::extract::connect_info::Connected;
 use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, Extension, Path as UrlPath, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Path as UrlPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::serve::IncomingStream;
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -31,7 +34,7 @@ use crate::backend::{
     Backend, Caller, Exposed, LocalBackend, MetaPatch, Purpose, Put, Refusal, Selection, Values,
 };
 use crate::config::{Config, Mode, Serve};
-use crate::policy::{self, Action, Rights};
+use crate::policy::{self, Action, Denial, Rights};
 use crate::vault::{Catalog, Store, validate_name};
 
 const BODY_LIMIT: usize = 64 * 1024;
@@ -47,6 +50,20 @@ pub struct AppState {
     audit: Arc<Path>,
     /// Where the UI posts a notification when it reveals values.
     ntfy: Option<Arc<str>>,
+    /// Connections from this uid carry Tailscale Serve's identity headers.
+    tailscaled_uid: u32,
+    /// The rights of the other local uids, from the config.
+    local: Arc<BTreeMap<u32, Rights>>,
+}
+
+/// The uid the kernel gives for the process at the other end of the socket.
+#[derive(Clone, Copy)]
+struct Peer(Option<u32>);
+
+impl Connected<IncomingStream<'_, UnixListener>> for Peer {
+    fn connect_info(stream: IncomingStream<'_, UnixListener>) -> Peer {
+        Peer(stream.io().peer_cred().ok().map(|c| c.uid()))
+    }
 }
 
 /// The authenticated request, set by [`authorize`] for the handlers.
@@ -68,17 +85,27 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
         );
     };
     let socket = socket_path(socket, &config.serve, &dir);
-    let ntfy = config.serve.ntfy.as_deref().map(Arc::from);
+    let local = policy::local(&config.serve.grants)
+        .map_err(|e| anyhow!("invalid [[serve.grant]] in {}: {e}", config.path.display()))?;
+    // Other users connect only when the config grants them rights; the grants, not the mode,
+    // then decide what they get.
+    let mode = if local.is_empty() { 0o600 } else { 0o666 };
     // Held until the socket is removed: only its holder touches the socket path.
     let _lock = lock_socket(&socket)?;
     #[cfg(target_os = "linux")]
     let sandbox = crate::harden::sandbox(&[&dir, socket_dir(&socket)], &[&identity])?;
     #[cfg(not(target_os = "linux"))]
     let sandbox = "not available on this system";
-    let backend = Arc::new(LocalBackend::new(
-        Store::new(&dir, identity, recipients),
-        &dir,
-    ));
+    let state = AppState {
+        backend: Arc::new(LocalBackend::new(
+            Store::new(&dir, identity, recipients),
+            &dir,
+        )),
+        audit: dir.join("audit.jsonl").into(),
+        ntfy: config.serve.ntfy.as_deref().map(Arc::from),
+        tailscaled_uid: config.serve.tailscaled_uid,
+        local: Arc::new(local),
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -86,13 +113,14 @@ pub fn serve(config: Config, socket: Option<PathBuf>) -> Result<()> {
         // Installed before the socket exists, so a signal sent once it appears is not lost.
         let term = signal(SignalKind::terminate())?;
         let int = signal(SignalKind::interrupt())?;
-        let listener = bind(&socket)?;
+        let listener = bind(&socket, mode)?;
         eprintln!(
             "agentsafe: serving on {} (Landlock: {sandbox})",
             socket.display()
         );
         let (stop, stopped) = oneshot::channel::<()>();
-        let server = axum::serve(listener, app(backend, &dir, ntfy)).with_graceful_shutdown(async {
+        let service = app(state).into_make_service_with_connect_info::<Peer>();
+        let server = axum::serve(listener, service).with_graceful_shutdown(async {
             let _ = stopped.await;
         });
         let mut server = pin!(server.into_future());
@@ -158,10 +186,10 @@ fn lock_socket(socket: &Path) -> Result<File> {
     }
 }
 
-/// Binds inside a fresh 0700 directory, narrows the socket to 0600 and renames it into place,
-/// so the socket is never reachable with wider permissions. The caller holds the socket lock, so
-/// a socket already at the path is stale.
-fn bind(path: &Path) -> Result<UnixListener> {
+/// Binds inside a fresh 0700 directory, sets the socket's mode and renames it into place, so the
+/// socket is never reachable with other permissions. The caller holds the socket lock, so a
+/// socket already at the path is stale.
+fn bind(path: &Path, mode: u32) -> Result<UnixListener> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_socket() => {
             fs::remove_file(path)
@@ -180,7 +208,7 @@ fn bind(path: &Path) -> Result<UnixListener> {
     let staged = tmp.path().join("s");
     let listener =
         UnixListener::bind(&staged).with_context(|| format!("cannot bind {}", staged.display()))?;
-    fs::set_permissions(&staged, Permissions::from_mode(0o600))?;
+    fs::set_permissions(&staged, Permissions::from_mode(mode))?;
     fs::rename(&staged, path).with_context(|| format!("cannot create {}", path.display()))?;
     Ok(listener)
 }
@@ -198,12 +226,7 @@ async fn shutdown(mut term: Signal, mut int: Signal) {
     .await;
 }
 
-fn app(backend: Arc<LocalBackend>, dir: &Path, ntfy: Option<Arc<str>>) -> Router {
-    let state = AppState {
-        backend,
-        audit: dir.join("audit.jsonl").into(),
-        ntfy,
-    };
+fn app(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/entries", get(list))
         .route(
@@ -217,19 +240,43 @@ fn app(backend: Arc<LocalBackend>, dir: &Path, ntfy: Option<Arc<str>>) -> Router
         .with_state(state)
 }
 
-/// Runs on every request, matched or not: rights from the Serve headers, then the CSRF header.
+/// Runs on every request, matched or not: rights from the Serve headers for `tailscaled`, from
+/// the config for another local uid, then the CSRF header.
 async fn authorize(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let ui = !req.uri().path().starts_with("/api/");
     let headers = req.headers();
-    let caller = caller(headers, req.uri().path());
-    let (rights, warnings) = policy::parse(
-        headers
-            .get("tailscale-app-capabilities")
-            .map(HeaderValue::as_bytes),
-    );
-    for w in warnings {
-        eprintln!("agentsafe: warning: {w}");
-    }
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<Peer>>()
+        .and_then(|c| c.0.0);
+    let (caller, rights) = match peer {
+        Some(uid) if uid == state.tailscaled_uid => {
+            let (rights, warnings) = policy::parse(
+                headers
+                    .get("tailscale-app-capabilities")
+                    .map(HeaderValue::as_bytes),
+            );
+            for w in warnings {
+                eprintln!("agentsafe: warning: {w}");
+            }
+            (caller(headers, req.uri().path()), rights)
+        }
+        // Another local process: its headers are its own claims, and ignored.
+        Some(uid) => (
+            Caller {
+                who: format!("uid:{uid}"),
+                via: via(req.uri().path()),
+            },
+            state.local.get(&uid).cloned().ok_or(Denial::NoLocalGrant),
+        ),
+        None => (
+            Caller {
+                who: "unknown".into(),
+                via: via(req.uri().path()),
+            },
+            Err(Denial::UnknownPeer),
+        ),
+    };
     let refused = match rights {
         Err(denial) => Some(denial.reason()),
         Ok(rights) => {
@@ -282,12 +329,18 @@ fn caller(headers: &HeaderMap, path: &str) -> Caller {
         (None, Some(addr)) => format!("node:{addr}"),
         (None, None) => "unknown".into(),
     };
-    let via = if path.starts_with("/api/") {
+    Caller {
+        who,
+        via: via(path),
+    }
+}
+
+fn via(path: &str) -> &'static str {
+    if path.starts_with("/api/") {
         "api"
     } else {
         "ui"
-    };
-    Caller { who, via }
+    }
 }
 
 /// The audited action of a request refused before its handler ran.

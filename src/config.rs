@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
+use crate::policy::Action;
+
 #[derive(Deserialize)]
 struct RawConfig {
     identity: Option<PathBuf>,
@@ -21,6 +23,21 @@ pub struct Serve {
     pub socket: Option<String>,
     /// Where the admin UI posts a notification when it reveals values.
     pub ntfy: Option<String>,
+    /// The uid whose connections carry Tailscale Serve's identity headers: `tailscaled`'s.
+    #[serde(default)]
+    pub tailscaled_uid: u32,
+    /// The rights of other local users, who connect to the socket directly.
+    #[serde(default, rename = "grant")]
+    pub grants: Vec<LocalGrant>,
+}
+
+/// A `[[serve.grant]]` table: what the processes of one uid may do.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalGrant {
+    pub uid: u32,
+    pub entries: Vec<String>,
+    pub actions: Vec<Action>,
 }
 
 pub enum Mode {

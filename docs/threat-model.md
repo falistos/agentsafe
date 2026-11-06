@@ -52,7 +52,8 @@ Does not stop: a spelling the masker does not cover, such as base32, upper-case 
 percent-encoding of unreserved characters; a value transformed before printing, written to a file or sent over the network from
 inside `run`, read back from a rendered file, or a value of another entry that the child reads
 elsewhere (`run` does not mask it). On Linux, a child's environment stays readable in
-`/proc/PID/environ` by every process of the same user while the child runs. In local mode the agent can read `identity.txt`. In remote mode
+`/proc/PID/environ` by every process of the same user while the child runs. In local mode the agent can read `identity.txt`: run `serve` as another user on the same host and
+give the agent's uid a `[[serve.grant]]` to take the identity and the vault out of its reach. In remote mode
 it holds the fetched values in memory and can call the API with its host's grants.
 
 ### Other local users
@@ -60,7 +61,11 @@ it holds the fetched values in memory and can call the API with its host's grant
 Other accounts on the client or the vault host.
 
 Stops: the config directory is 0700; the config, identity, vault, catalog, lock, audit log, socket
-lock and socket are 0600. A rendered file is 0600 from its creation.
+lock and socket are 0600, the socket 0666 once `[[serve.grant]]` lets other users in. A rendered
+file is 0600 from its creation.
+
+`serve` takes Serve's identity headers only from `tailscaled_uid`. Another local uid gets the
+rights of its `[[serve.grant]]` tables, or none, whatever headers it sends.
 
 On Linux, `serve` confines itself with Landlock once its socket is locked: it reads and writes
 only its config directory and its socket's directory, reads its identity and `/etc`, executes
@@ -104,7 +109,8 @@ Does not stop: a compromised browser or extension, or someone at the owner's unl
 
 ## Assumptions
 
-- **`tailscaled` is trusted.** It authenticates peers, sets `Tailscale-User-Login`,
+- **`tailscaled` is trusted**, and so is every process of `tailscaled_uid` (root by default),
+  since the server believes the headers it sends. It authenticates peers, sets `Tailscale-User-Login`,
   `X-Forwarded-For` and `Tailscale-App-Capabilities`, removes forged ones, and terminates TLS, so it
   sees every value it proxies. It runs as root and can connect to the 0600 socket.
 - **The server user is trusted.** It holds the identity; it, root, and anything running as either
