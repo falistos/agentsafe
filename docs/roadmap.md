@@ -19,6 +19,8 @@
 - One-key rotation (`set NAME --key KEY`, the API's `merge`), signal forwarding in `run`, and
   `render` refusing an allowed entry its template never reads (0.1.1).
 - A migration guide from a directory of secret files ([migrate.md](migrate.md)).
+- Masking of a value its own marker contains and of a six-byte value inside base64; one key
+  grammar for every write (0.1.2).
 
 ## Left
 
