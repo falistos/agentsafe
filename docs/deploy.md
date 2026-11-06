@@ -1,8 +1,10 @@
 # Deploy `agentsafe serve`
 
-> Run on a real tailnet on a macOS host (a LaunchAgent, Tailscale 1.104.1) serving a macOS client:
-> `list`, `describe`, `run`, `render`, `set` and `rm` worked and were audited by the caller's login.
-> The systemd unit below is untested under systemd. Report what differs.
+> Checked on a real tailnet, on a macOS host (a LaunchAgent, Tailscale 1.104.1) serving a macOS
+> client: `list`, `describe`, `run`, `render`, `set` and `rm` worked and were audited by the
+> caller's login. The systemd unit below was checked on Debian 12 (systemd 252) with the v0.1.2
+> release binary, the Serve headers sent by hand: the API, the UI, a reveal with ntfy and a clean
+> stop all worked under its sandbox. Report what differs.
 
 The server runs as a dedicated user under systemd on a Linux host, listens on a Unix socket, and
 `tailscale serve` publishes it on the tailnet with the callers' grants.

@@ -1,0 +1,4 @@
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/falistos/agentsafe/security/advisories/new
+    about: Privately, never in a public issue.

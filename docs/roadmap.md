@@ -21,6 +21,8 @@
 - A migration guide from a directory of secret files ([migrate.md](migrate.md)).
 - Masking of a value its own marker contains and of a six-byte value inside base64; one key
   grammar for every write (0.1.2).
+- Remote mode checked on a real tailnet, and the systemd unit of [deploy.md](deploy.md) under
+  systemd.
 
 ## Left
 
@@ -28,8 +30,6 @@
 - `export`, to regenerate an env file from the vault, and `export --check`, to report drift
   without printing values.
 - An agent hook that pipes tool output through `agentsafe scrub` before the agent reads it.
-- The systemd unit of [deploy.md](deploy.md), run under systemd. Serve's headers and the grant
-  were checked on a real tailnet on 2026-11-06, from a macOS host.
 
 ## Later: short-lived credentials
 
