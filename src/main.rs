@@ -112,6 +112,12 @@ enum Cmd {
     Scrub,
     /// Compare each file of a directory with the entry imported from it, by fingerprint.
     VerifyImport { dir: PathBuf },
+    /// Print the agent skill that teaches agentsafe, or install it for Claude Code and Codex.
+    Skill {
+        /// Write it to ~/.claude/skills/agentsafe/SKILL.md and ~/.agents/skills/agentsafe/SKILL.md.
+        #[arg(long)]
+        install: bool,
+    },
     /// Serve the local vault over HTTP on a Unix socket, for `tailscale serve`.
     Serve {
         /// Socket path; default `[serve].socket`, `$XDG_RUNTIME_DIR/agentsafe.sock`, or
@@ -204,6 +210,14 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
         init::init(server)?;
         return Ok(ExitCode::SUCCESS);
     }
+    if let Cmd::Skill { install } = cmd {
+        if install {
+            install_skill()?;
+        } else {
+            print!("{SKILL}");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let config = Config::load()?;
     if let Cmd::Serve { socket } = cmd {
         server::serve(config, socket)?;
@@ -222,7 +236,7 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
     };
     let backend = backend.as_ref();
     match cmd {
-        Cmd::Init { .. } | Cmd::Serve { .. } => unreachable!("handled above"),
+        Cmd::Init { .. } | Cmd::Skill { .. } | Cmd::Serve { .. } => unreachable!("handled above"),
         Cmd::List => list(backend)?,
         Cmd::Describe { name } => describe(backend, &name)?,
         Cmd::Set { name, key, meta } => {
@@ -280,6 +294,21 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
         Cmd::VerifyImport { dir } => return verify_import(backend, &dir),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+const SKILL: &str = include_str!("../skills/agentsafe/SKILL.md");
+
+/// Claude Code reads `~/.claude/skills`, Codex and other Agent Skills readers `~/.agents/skills`.
+fn install_skill() -> Result<()> {
+    let home = config::home()?;
+    for dir in [".claude/skills/agentsafe", ".agents/skills/agentsafe"] {
+        let dir = home.join(dir);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let file = dir.join("SKILL.md");
+        fs::write(&file, SKILL).with_context(|| format!("cannot write {}", file.display()))?;
+        println!("{}", file.display());
+    }
+    Ok(())
 }
 
 fn list(backend: &dyn Backend) -> Result<()> {

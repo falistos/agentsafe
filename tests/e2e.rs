@@ -1677,3 +1677,26 @@ fn set_help_names_both_input_forms() {
         "{about}"
     );
 }
+
+#[test]
+fn skill_prints_and_installs_the_same_file_for_claude_code_and_codex() {
+    let home = tempfile::tempdir().unwrap();
+    let skill = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_agentsafe"))
+            .args(args)
+            .env("HOME", home.path())
+            .env_remove("AGENTSAFE_CONFIG")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        text(&out.stdout)
+    };
+    let printed = skill(&["skill"]);
+    assert!(printed.starts_with("---\nname: agentsafe\n"), "{printed}");
+    let installed = skill(&["skill", "--install"]);
+    for dir in [".claude/skills", ".agents/skills"] {
+        let file = home.path().join(dir).join("agentsafe/SKILL.md");
+        assert!(installed.contains(file.to_str().unwrap()), "{installed}");
+        assert_eq!(fs::read_to_string(file).unwrap(), printed);
+    }
+}
