@@ -26,8 +26,8 @@
 - `export`, to regenerate an env file from the vault, and `export --check`, to report drift
   without printing values.
 - An agent hook that pipes tool output through `agentsafe scrub` before the agent reads it.
-- A test on a real tailnet: Serve's headers, the policy example and the unit file of
-  [deploy.md](deploy.md).
+- The systemd unit of [deploy.md](deploy.md), run under systemd. Serve's headers and the grant
+  were checked on a real tailnet on 2026-11-06, from a macOS host.
 
 ## Later: short-lived credentials
 

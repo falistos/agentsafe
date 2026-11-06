@@ -1,8 +1,8 @@
 # Deploy `agentsafe serve`
 
-> Untested on a real tailnet, and the unit file is untested under systemd. The steps follow the
-> code and Tailscale's documentation; the server has only run behind a local test proxy that
-> injects the capability, login and address headers Serve sets. Report what differs.
+> Run on a real tailnet on a macOS host (a LaunchAgent, Tailscale 1.104.1) serving a macOS client:
+> `list`, `describe`, `run`, `render`, `set` and `rm` worked and were audited by the caller's login.
+> The systemd unit below is untested under systemd. Report what differs.
 
 The server runs as a dedicated user under systemd on a Linux host, listens on a Unix socket, and
 `tailscale serve` publishes it on the tailnet with the callers' grants.
@@ -104,6 +104,12 @@ sudo tailscale serve --bg \
   --accept-app-caps=github.com/falistos/agentsafe/cap/agentsafe \
   unix:/run/agentsafe/agentsafe.sock
 ```
+
+Serve needs root, or an operator allowed to run `sudo tailscale`, to proxy a Unix socket. Without
+`--https=PORT` it takes 443. Pick a port nothing on the host binds on its tailnet address: Serve
+takes the port from every tailnet peer before the host sees the connection, so a web server already
+on that address and port stops answering them. With another port, add it to the URLs below and to
+the grant's `ip`.
 
 Serve answers on `https://<host>.<tailnet>.ts.net` and forwards each request with the caller's
 values of that capability in `Tailscale-App-Capabilities`. Without `--accept-app-caps` every
