@@ -169,7 +169,30 @@ agentsafe run --env github:TOKEN=GH_TOKEN -- gh api user
 
 The client config holds only `server`; there is no identity on the client.
 
-## 6. ntfy (optional)
+## 6. Agents on the vault host
+
+An agent on the vault host that runs as its own user gets entries through the socket instead of
+the vault: it never holds the identity. Grant its uid in the server's config:
+
+```toml
+[[serve.grant]]
+uid = 1000          # id -u of the agent's user
+entries = ["github", "ci-*"]
+actions = ["get"]
+```
+
+With a grant, the socket is 0666 and its directory must let that user through: set
+`RuntimeDirectoryMode=0755` in the unit. Headers are trusted only from `tailscaled_uid` (default 0),
+so a local user cannot claim a tailnet grant. Then, as the agent's user:
+
+```sh
+agentsafe init --server unix:/run/agentsafe/agentsafe.sock
+agentsafe run --env github:TOKEN=GH_TOKEN -- gh api user
+```
+
+The audit log names it `uid:1000`.
+
+## 7. ntfy (optional)
 
 With `[serve] ntfy = "<URL>"`, each reveal in the UI POSTs `<who> revealed <NAME>: <reason>` to
 that URL with the title `agentsafe reveal`. The request has no authentication header, so the URL
@@ -177,7 +200,7 @@ must accept an anonymous publish; use a topic name nobody can guess, or a self-h
 URL is a secret: it is not logged. A failed notification (3 s timeout) does not block the reveal and
 is recorded as `"notify": "failed"`.
 
-## 7. Backups
+## 8. Backups
 
 Back up `vault.age` and `identity.txt`, separately: together they give every value. `catalog.toml`
 is regenerated on the next write; keep `audit.jsonl` if the history matters. Without `vault.age`

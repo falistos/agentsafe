@@ -14,6 +14,14 @@ use std::time::{Duration, Instant};
 pub const PEER: &str = "100.101.102.103";
 const CAP: &str = "github.com/falistos/agentsafe/cap/agentsafe";
 
+/// The `[serve]` table of a server behind [`Proxy`], which runs as the test's uid, not as root.
+pub fn serve_table() -> String {
+    format!(
+        "[serve]\ntailscaled_uid = {}\n",
+        rustix::process::getuid().as_raw()
+    )
+}
+
 pub fn caps(values: &str) -> String {
     format!(r#"{{"{CAP}": [{values}]}}"#)
 }

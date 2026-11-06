@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixDatagram, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -26,7 +26,7 @@ mod common;
 mod proxy;
 
 use common::{fixtures, local_dir, text};
-use proxy::{PEER, Proxy, caps, wait_for_socket};
+use proxy::{PEER, Proxy, caps, serve_table, wait_for_socket};
 
 const API_TOKEN: &str = "fixture-token-0123456789abcdef";
 const DB_PASSWORD: &str = "fx-pa\"ss:word/with+chars";
@@ -39,13 +39,32 @@ struct Home {
 
 impl Home {
     fn local() -> Home {
+        Home::local_with(&serve_table())
+    }
+
+    /// A server's home whose `[serve]` settings are `table`.
+    fn local_with(table: &str) -> Home {
         let home = Home { dir: local_dir() };
+        let mut config = fs::read_to_string(home.path("config.toml")).unwrap();
+        config.push_str(table);
+        fs::write(home.path("config.toml"), config).unwrap();
         for name in ["app", "db"] {
             let file = fixtures().join(format!("{name}.env"));
             home.ok(&["import", file.to_str().unwrap(), "--name", name]);
         }
         home.ok_stdin(&["set", "other", "--key", "V"], OTHER_VALUE);
         home
+    }
+
+    /// A client of the server on this host, through its socket.
+    fn unix(socket: &Path) -> Home {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            format!("server = \"unix:{}\"\n", socket.display()),
+        )
+        .unwrap();
+        Home { dir }
     }
 
     fn remote(proxy: &Proxy) -> Home {
@@ -1211,7 +1230,7 @@ fn server_with_ntfy(url: Option<&str>) -> Server {
     let home = Home::local();
     if let Some(url) = url {
         let mut config = fs::read_to_string(home.path("config.toml")).unwrap();
-        write!(config, "\n[serve]\nntfy = {url:?}\n").unwrap();
+        writeln!(config, "ntfy = {url:?}").unwrap();
         fs::write(home.path("config.toml"), config).unwrap();
     }
     Server::start(home)
@@ -1570,4 +1589,113 @@ fn sigterm_completes_while_another_process_holds_the_vault_lock() {
         !described.contains("late-owner"),
         "the write applied after shutdown"
     );
+}
+
+fn my_uid() -> u32 {
+    rustix::process::getuid().as_raw()
+}
+
+/// One request straight to the socket; returns the whole answer.
+fn raw(socket: &Path, request: &str) -> String {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    answer
+}
+
+/// A local process gets the rights the config grants its uid, whatever headers it sends: only
+/// `tailscaled`'s uid speaks for tailnet peers.
+#[test]
+fn a_local_peer_gets_the_rights_of_its_uid_and_nothing_its_headers_claim() {
+    let uid = my_uid();
+    let home = Home::local_with(&format!(
+        "[[serve.grant]]\nuid = {uid}\nentries = [\"app\"]\nactions = [\"get\"]\n"
+    ));
+    let server = Server::start(home);
+    let mode = fs::metadata(&server.socket).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o666, "other users must reach the socket");
+
+    let client = Home::unix(&server.socket);
+    let out = client.ok(&[
+        "run",
+        "--env",
+        "app",
+        "--",
+        "sh",
+        "-c",
+        "echo \"$API_TOKEN\"",
+    ]);
+    assert_eq!(out, "***app***\n");
+    let listed = client.ok(&["list"]);
+    assert!(
+        listed.contains("\napp\t") && !listed.contains("\ndb\t"),
+        "{listed}"
+    );
+    let err = client.fails(&["run", "--env", "db", "--", "true"]);
+    assert!(err.contains("403"), "{err}");
+    assert!(!err.contains(DB_PASSWORD), "{err}");
+
+    let admin = caps(r#"{"entries": ["*"], "actions": ["admin"]}"#);
+    let forged = |request: &str| {
+        raw(
+            &server.socket,
+            &format!(
+                "{request} HTTP/1.1\r\nHost: localhost\r\nSec-Agentsafe: 1\r\n\
+                 Tailscale-App-Capabilities: {admin}\r\nTailscale-User-Login: root@example.com\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        )
+    };
+    let listed = forged("GET /api/v1/entries");
+    assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
+    assert!(
+        listed.contains("\"app\"") && !listed.contains("\"db\""),
+        "{listed}"
+    );
+    let removed = forged("DELETE /api/v1/entries/db");
+    assert!(removed.starts_with("HTTP/1.1 403"), "{removed}");
+
+    let who = format!("uid:{uid}");
+    let lines: Vec<_> = server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["via"] == "api")
+        .collect();
+    assert!(lines.iter().all(|l| l["who"] == who.as_str()), "{lines:?}");
+    let outcome = |action: &str, entry: &str| {
+        lines
+            .iter()
+            .filter(|l| l["action"] == action && l["entry"] == entry)
+            .map(|l| l["result"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(outcome("get", "app"), ["ok"]);
+    assert_eq!(outcome("get", "db"), ["denied"]);
+    assert_eq!(outcome("rm", "db"), ["denied"]);
+}
+
+#[test]
+fn a_local_uid_without_a_grant_is_refused_and_audited() {
+    let other = my_uid() + 1;
+    let home = Home::local_with(&format!(
+        "[[serve.grant]]\nuid = {other}\nentries = [\"*\"]\nactions = [\"admin\"]\n"
+    ));
+    let server = Server::start(home);
+    let err = Home::unix(&server.socket).fails(&["list"]);
+    assert!(err.contains("no grant for this uid"), "{err}");
+    let last = server.home.audit().pop().unwrap();
+    assert_eq!(last["who"], format!("uid:{}", my_uid()).as_str());
+    assert_eq!(last["result"], "denied");
+}
+
+#[test]
+fn an_invalid_local_grant_stops_serve_at_startup() {
+    let home =
+        Home::local_with("[[serve.grant]]\nuid = 1\nentries = [\"a*b\"]\nactions = [\"get\"]\n");
+    let socket = home.path("agentsafe.sock");
+    let err = home.fails(&["serve", "--socket", socket.to_str().unwrap()]);
+    assert!(err.contains("invalid [[serve.grant]]"), "{err}");
+    assert!(!socket.exists());
 }

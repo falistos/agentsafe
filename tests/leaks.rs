@@ -26,7 +26,7 @@ mod common;
 mod proxy;
 
 use common::{fixtures, local_dir, text};
-use proxy::{Proxy, caps, wait_for_socket};
+use proxy::{Proxy, caps, serve_table, wait_for_socket};
 
 const MARKER: &str = "leakmark-Zq7XcV4n2Pw9";
 const ADMIN: &str = r#"{"entries": ["*"], "actions": ["admin"]}"#;
@@ -67,8 +67,9 @@ impl Lab {
         lab.config(
             "ntfy.toml",
             &format!(
-                "identity = {:?}\n[serve]\nntfy = \"http://127.0.0.1:1/{MARKER}\"\n",
-                key.display()
+                "identity = {:?}\n{}ntfy = \"http://127.0.0.1:1/{MARKER}\"\n",
+                key.display(),
+                serve_table()
             ),
         );
         fs::create_dir(lab.path("work")).unwrap();

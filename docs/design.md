@@ -24,7 +24,7 @@ The config directory holds:
 
 | File | Content |
 |---|---|
-| `config.toml` | `identity` or `server`, `recipients`, and a `[serve]` table (`socket`, `ntfy`). |
+| `config.toml` | `identity` or `server`, `recipients`, and a `[serve]` table (`socket`, `ntfy`, `tailscaled_uid`, `[[serve.grant]]`). |
 | `identity.txt` | The age identity (local mode only). |
 | `vault.age` | The encrypted vault. |
 | `vault.lock` | The write lock. |
@@ -84,7 +84,8 @@ the owner's agents act as the owner, and their fetches and writes are audited wi
 
 ### Remote mode
 
-The config has `server = "<URL>"` (`https://host.tailnet.ts.net`, or `http://...`) and no identity.
+The config has `server = "<URL>"` (`https://host.tailnet.ts.net`, `http://...`, or
+`unix:/path/to/agentsafe.sock` for a server on the same host) and no identity.
 `agentsafe init --server URL` writes it. Every command except `init` and `serve` calls the server,
 which checks the caller's grants and audits with `via: "api"`. The client gets values only from
 `fetch`, holds them in memory for the command, injects and masks them locally. The server audits
@@ -113,6 +114,27 @@ agent host ──tailnet──▶ tailscaled (Serve, TLS on host.tailnet.ts.net:
 | `X-Forwarded-Host` | The host the client asked for. | The UI's `Origin` check. |
 | `Sec-Agentsafe` | No: the client sends `Sec-Agentsafe: 1`. | CSRF guard on `/api/`. |
 
+### Local peers
+
+The server asks the kernel which uid is at the other end of each connection (`SO_PEERCRED` on
+Linux, `getpeereid` on macOS). Only connections from `tailscaled_uid` (default 0, `tailscaled`
+runs as root) carry Serve's headers. Any other uid is a local peer: its headers are ignored, its
+rights are the `[[serve.grant]]` tables for its uid, and it is audited as `uid:<n>`:
+
+```toml
+[[serve.grant]]
+uid = 1000
+entries = ["github", "ci-*"]
+actions = ["get"]
+```
+
+The fields and their meaning are those of a [capability](#capability) value. A uid without a table
+is refused with `no grant for this uid`; an invalid pattern stops `serve` at startup. With at least
+one table, the socket is 0666: who connects is the kernel's answer, not the file mode.
+
+An agent that runs as its own user and reaches the server this way never holds the identity or the
+vault: it gets what its uid is granted, through the same audited API as a tailnet peer.
+
 ### Why a missing header is refused
 
 The server has no user database: Tailscale policy is the access control, and the capability header
@@ -126,8 +148,9 @@ the capability as having no grant.
 
 Serve strips identity and capability headers sent by the client, but a process that connects to
 the socket directly bypasses Serve and can send any header, including a grant of `admin` on `*`.
-The socket is therefore bound in a fresh 0700 directory, narrowed to 0600 and renamed into place,
-so only the server user (and root, which `tailscaled` runs as) can connect. `serve` holds an
+Headers are therefore trusted only from `tailscaled_uid`, and without `[[serve.grant]]` the socket
+is bound in a fresh 0700 directory, narrowed to 0600 and renamed into place, so that only the
+server user and root can connect at all. `serve` holds an
 exclusive lock on `<socket>.lock` while it runs: a second `serve` on the same socket is refused,
 and a socket left by a crashed server is removed. On SIGTERM or SIGINT it stops accepting, gives
 open requests at most 5 s, then removes the socket. A write runs whole under `vault.lock`, so
