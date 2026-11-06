@@ -84,6 +84,8 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# serve confines itself with Landlock, which @system-service does not include (systemd 252).
+SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self
 
 [Install]
 WantedBy=multi-user.target
