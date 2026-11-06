@@ -92,7 +92,7 @@ WantedBy=multi-user.target
 ```sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now agentsafe
-journalctl -u agentsafe    # "agentsafe: serving on /run/agentsafe/agentsafe.sock"
+journalctl -u agentsafe    # "agentsafe: serving on /run/agentsafe/agentsafe.sock (Landlock: enforced)"
 ```
 
 The socket is 0600 in a 0700 directory: only `agentsafe` and root (`tailscaled`) can connect. Keep

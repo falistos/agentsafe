@@ -138,6 +138,36 @@ fn run_masks_stderr_and_keeps_the_exit_code() {
     assert_eq!(text(&out.stderr), "***db***\n");
 }
 
+/// The agentsafe process holds every fetched value: no core dump, and on Linux no other process
+/// of the user reads its memory or environment.
+#[test]
+fn run_is_not_dumpable() {
+    let home = Home::new();
+    home.import_fixtures();
+    let (probe, expected) = if cfg!(target_os = "linux") {
+        (
+            "ulimit -c; cat /proc/$PPID/environ >/dev/null 2>&1 && echo readable || echo denied",
+            "0\ndenied\n",
+        )
+    } else {
+        ("ulimit -c", "0\n")
+    };
+    // The soft limit raised first, so that the 0 comes from agentsafe, not from the test host.
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            "ulimit -S -c \"$(ulimit -H -c)\" && exec \"$@\"",
+            "sh",
+        ])
+        .arg(env!("CARGO_BIN_EXE_agentsafe"))
+        .args(["run", "--env", "db", "--", "sh", "-c", probe])
+        .env("AGENTSAFE_CONFIG", home.path("config.toml"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stdout), expected, "{}", text(&out.stderr));
+}
+
 #[test]
 fn verify_import_reports_ok_for_fixtures() {
     let home = Home::new();
