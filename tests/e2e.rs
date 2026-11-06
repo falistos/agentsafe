@@ -1494,6 +1494,19 @@ fn a_padded_base64_token_is_refused_by_import_and_set() {
 }
 
 #[test]
+fn a_key_outside_the_dotenv_grammar_is_refused() {
+    let home = Home::new();
+    for key in ["my=key", "1abc", "a b", ""] {
+        let out = home.agentsafe_stdin(&["set", "amb", "--key", key], "value-123456\n");
+        assert!(!out.status.success(), "{key:?} accepted");
+        let stderr = text(&out.stderr);
+        assert!(!stderr.contains("value-123456"), "{stderr}");
+        assert!(key.is_empty() || !stderr.contains(key), "{stderr}");
+    }
+    assert_eq!(text(&home.agentsafe(&["list"]).stdout).lines().count(), 1);
+}
+
+#[test]
 fn a_padded_base64_token_is_stored_by_set_with_a_key() {
     for token in PADDED_TOKENS {
         let home = Home::new();

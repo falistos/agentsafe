@@ -36,6 +36,18 @@ impl Masker {
                 }
             }
         }
+        // The output is not masked again, so a marker that contains a pattern (a value equal to
+        // its entry's name, say) would print it; `***` is shorter than any pattern.
+        for marker in &mut markers {
+            if patterns.iter().any(|p| {
+                marker
+                    .as_bytes()
+                    .windows(p.len())
+                    .any(|w| w == p.as_slice())
+            }) {
+                *marker = "***".into();
+            }
+        }
         let mut by_first_byte = vec![Vec::new(); 256];
         for (i, p) in patterns.iter().enumerate() {
             by_first_byte[usize::from(p[0])].push(i);
@@ -156,9 +168,22 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
         let tail = &v[offset..];
         let determined = tail.len() * 4 / 3;
         for engine in [STANDARD_NO_PAD, URL_SAFE_NO_PAD] {
-            let mut encoded = engine.encode(tail);
-            encoded.truncate(determined);
-            out.push(encoded.into_bytes());
+            if determined >= MIN_LEN || tail.len().is_multiple_of(3) {
+                let mut encoded = engine.encode(tail);
+                encoded.truncate(determined);
+                out.push(encoded.into_bytes());
+                continue;
+            }
+            // Too short to mask alone: add the next character, which mixes the tail's last bits
+            // with the following byte, in each form that byte can give it.
+            let mut padded = tail.to_vec();
+            padded.push(0);
+            for next in 0..=u8::MAX {
+                *padded.last_mut().expect("just pushed") = next;
+                let mut encoded = engine.encode(&padded);
+                encoded.truncate(determined + 1);
+                out.push(encoded.into_bytes());
+            }
         }
     }
     out.push(hex::encode(v).into_bytes());
@@ -294,6 +319,25 @@ mod tests {
                 assert!(out.contains("***tok***"), "prefix {prefix:?}: {out}");
             }
         }
+    }
+
+    #[test]
+    fn masks_base64_of_a_six_byte_value_at_every_alignment() {
+        let m = Masker::new([("short", "s3cr3t")]);
+        for prefix in ["", "a", "ab", "abcd"] {
+            for tail in ["", "tail"] {
+                let encoded = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{prefix}s3cr3t{tail}"));
+                let out = mask(&m, &[encoded.as_bytes()]);
+                assert!(out.contains("***short***"), "{prefix:?}+{tail:?}: {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_marker_that_would_print_a_value_is_shortened() {
+        let m = Masker::new([("github", "github"), ("other", "***oth")]);
+        assert_eq!(mask(&m, &[b"x github y ***oth z"]), "x *** y *** z");
     }
 
     #[test]
