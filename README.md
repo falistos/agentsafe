@@ -148,17 +148,23 @@ audited the same whether or not some of its keys are plain. `describe` never pri
 
 An agent reads more than the output of `agentsafe run`: files, logs, the output of other tools. A hook can pipe
 every tool result through `agentsafe scrub` before the agent reads it. For Claude Code, save this script as
-`agentsafe-claude-hook` on your `PATH` (it needs `jq`):
+`agentsafe-claude-hook` on your `PATH` (it needs `jq` 1.7 or later):
 
 ```sh
 #!/bin/sh
 # Claude Code PostToolUse hook: the tool's result reaches the model with agentsafe values masked.
+# Each string of the result is scrubbed on its own and put back at its path, so a mask never breaks the JSON.
 # Printing nothing keeps the original result: when nothing matched, or when a step failed.
-in=$(cat) || exit 0
-resp=$(printf '%s' "$in" | jq -c '.tool_response') || exit 0
-masked=$(printf '%s' "$resp" | agentsafe scrub) || exit 0
-[ "$masked" = "$resp" ] && exit 0
-printf '%s' "$masked" | jq -c '{hookSpecificOutput: {hookEventName: "PostToolUse", updatedToolOutput: .}}'
+d=$(mktemp -d) || exit 0
+trap 'rm -rf "$d"' EXIT
+# Wrapped in an object, so a result that is a bare string has a path too.
+jq -c '{r: .tool_response}' > "$d/resp" || exit 0
+jq --raw-output0 'paths(type == "string") as $p | getpath($p)' "$d/resp" > "$d/in" 2>/dev/null || exit 0
+agentsafe scrub < "$d/in" > "$d/out" || exit 0
+cmp -s "$d/in" "$d/out" && exit 0
+jq -c --rawfile s "$d/out" '($s | split("\u0000")) as $v
+  | reduce ([paths(type == "string")] | to_entries[]) as $e (.; setpath($e.value; $v[$e.key]))
+  | {hookSpecificOutput: {hookEventName: "PostToolUse", updatedToolOutput: .r}}' "$d/resp"
 ```
 
 and register it in `~/.claude/settings.json`:
@@ -168,12 +174,12 @@ and register it in `~/.claude/settings.json`:
 ```
 
 [`updatedToolOutput`](https://code.claude.com/docs/en/hooks#posttooluse-decision-control) must keep the shape of
-the tool's output. The script scrubs the JSON text of `tool_response`, where a value appears JSON-escaped, which
-[masking](#masking) covers, and parses it back, so the shape stays and only strings change. Limits: a step that
-fails (no vault, a server out of reach) lets the original result through; a value split across two JSON
-strings, or spelled in a way masking does not cover, passes; and the hook changes only what the model reads, not
-what the tool did or what Claude Code logged. Mark configuration keys [plain](#plain-keys) first, or the hook
-masks them in every result.
+the tool's output. The script scrubs each string of `tool_response` on its own and sets it back at its path, so
+only strings change and the JSON stays valid even when a masked value looks like a number. Limits: numbers and
+object keys are not scrubbed; a step that fails (no vault, a server out of reach, a string holding a NUL byte)
+lets the original result through; a value split across two strings, or spelled in a way masking does not cover,
+passes; and the hook changes only what the model reads, not what the tool did or what Claude Code logged. Mark
+configuration keys [plain](#plain-keys) first, or the hook masks them in every result.
 
 ## Remote mode
 
