@@ -11,12 +11,19 @@ use serde::{Deserialize, Serialize};
 use crate::audit::{AuditLog, Event, Outcome};
 use crate::dotenv;
 use crate::mask::{MIN_LEN, Masker};
-use crate::vault::{Catalog, Entry, Meta, Store, validate_name};
+use crate::vault::{Catalog, Entry, Store, validate_name};
 
 /// Key name to value, for one entry.
 pub type Values = BTreeMap<String, SecretString>;
-/// Entry name to its values.
-pub type Fetched = BTreeMap<String, Values>;
+/// What a fetch returns: each entry's values, and the keys of each whose value is not secret.
+/// An entry with no plain key is absent from `plain`, so a server that predates it reads as all
+/// secret.
+#[derive(Deserialize, Default)]
+pub struct Fetched {
+    pub entries: BTreeMap<String, Values>,
+    #[serde(default)]
+    pub plain: BTreeMap<String, BTreeSet<String>>,
+}
 
 /// What the fetched values are for; the backend audits it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -84,6 +91,12 @@ pub struct MetaPatch {
     pub tags: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Keys to mark as not secret: still injected and rendered, never masked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plain: Vec<String>,
+    /// Keys to mark as secret again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret: Vec<String>,
 }
 
 impl MetaPatch {
@@ -91,9 +104,10 @@ impl MetaPatch {
         *self == MetaPatch::default()
     }
 
-    fn apply(self, meta: &mut Meta) -> Result<()> {
+    /// Applied once the entry has its new values, which the plain and secret keys must name.
+    fn apply(self, entry: &mut Entry) -> Result<()> {
         let text = |v: String| Some(v).filter(|v| !v.is_empty());
-        // Parse first, so a bad date leaves the metadata untouched.
+        // Check first, so a bad date or key leaves the metadata untouched.
         let rotate_by = match self.rotate_by {
             None => None,
             Some(d) if d.is_empty() => Some(None),
@@ -102,6 +116,20 @@ impl MetaPatch {
                 Refusal::Invalid("invalid rotate-by: use YYYY-MM-DD".into())
             })?)),
         };
+        // Neither error quotes the key: a value given by mistake would reach API answers and the audit log.
+        for key in self.plain.iter().chain(&self.secret) {
+            if !entry.values.contains_key(key) {
+                return Err(
+                    Refusal::Invalid("a plain or secret key is not in the entry".into()).into(),
+                );
+            }
+            if self.plain.contains(key) && self.secret.contains(key) {
+                return Err(
+                    Refusal::Invalid("a key is given as both plain and secret".into()).into(),
+                );
+            }
+        }
+        let meta = &mut entry.meta;
         if let Some(v) = self.description {
             meta.description = text(v);
         }
@@ -120,6 +148,11 @@ impl MetaPatch {
         if let Some(v) = self.source {
             meta.source = text(v);
         }
+        meta.plain.extend(self.plain);
+        for key in &self.secret {
+            meta.plain.remove(key);
+        }
+        meta.plain.retain(|k| entry.values.contains_key(k));
         Ok(())
     }
 }
@@ -172,12 +205,14 @@ impl Serialize for Exposed<'_> {
     }
 }
 
-/// A masker for everything that was fetched, entry by entry.
+/// A masker for every secret value that was fetched, entry by entry; plain values pass.
 pub fn masker(fetched: &Fetched) -> Masker {
-    Masker::new(fetched.iter().flat_map(|(name, values)| {
+    Masker::new(fetched.entries.iter().flat_map(|(name, values)| {
+        let plain = fetched.plain.get(name);
         values
-            .values()
-            .map(move |v| (name.as_str(), v.expose_secret()))
+            .iter()
+            .filter(move |(k, _)| !plain.is_some_and(|p| p.contains(*k)))
+            .map(move |(_, v)| (name.as_str(), v.expose_secret()))
     }))
 }
 
@@ -306,13 +341,13 @@ impl LocalBackend {
                     .entry(name.to_string())
                     .or_insert_with(Entry::default),
             };
-            put.meta.apply(&mut entry.meta)?;
             if let Some(values) = put.values {
                 match mode {
                     Mode::Replace => entry.values = values,
                     Mode::Merge => entry.values.extend(values),
                 }
             }
+            put.meta.apply(entry)?;
             Ok(entry.values.len())
         })
     }
@@ -381,10 +416,16 @@ impl LocalBackend {
             self.record(caller, action, None, Outcome::Ok, None)?;
         }
         let mut vault = vault;
-        Ok(names
-            .into_iter()
-            .filter_map(|n| vault.entries.remove(&n).map(|e| (n, e.values)))
-            .collect())
+        let mut fetched = Fetched::default();
+        for name in names {
+            if let Some(entry) = vault.entries.remove(&name) {
+                if !entry.meta.plain.is_empty() {
+                    fetched.plain.insert(name.clone(), entry.meta.plain);
+                }
+                fetched.entries.insert(name, entry.values);
+            }
+        }
+        Ok(fetched)
     }
 
     /// The values of one entry for the admin UI, audited as `reveal` with the reason. `notify`

@@ -9,7 +9,8 @@ run, and their output comes back to you masked as `***NAME***`.
 ## Find
 
 - `agentsafe list`: every entry, with its description, owner, tags and rotation date.
-- `agentsafe describe NAME`: one entry's key names, and which keys are too short to be masked.
+- `agentsafe describe NAME`: one entry's key names, and which keys are plain (not secret, never
+  masked) or too short to be masked.
 
 ## Use
 
@@ -39,7 +40,10 @@ agentsafe set NAME --key KEY < FILE
 agentsafe import FILE.env --name NAME
 ```
 
-`set --key` changes that key only. A value you must type yourself is the owner's to enter: ask them
+`set --key` changes that key only. A key that holds configuration rather than a secret (a login
+name, a URL, a region) can be marked plain, so its value shows in output: `--plain KEY` on `set`,
+`import` or `edit`, and `--secret KEY` to undo. Never mark a password, token or key plain. A value
+you must type yourself is the owner's to enter: ask them
 to run the `set` command.
 
 ## When it says no

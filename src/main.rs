@@ -145,6 +145,12 @@ struct MetaArgs {
     /// Free-form label; repeat for several, empty clears.
     #[arg(long = "tag")]
     tags: Vec<String>,
+    /// Mark KEY as not secret: still injected and rendered, never masked; repeat for several.
+    #[arg(long, value_name = "KEY")]
+    plain: Vec<String>,
+    /// Mark KEY as secret again, as every key is by default; repeat for several.
+    #[arg(long, value_name = "KEY")]
+    secret: Vec<String>,
 }
 
 impl MetaArgs {
@@ -160,6 +166,8 @@ impl MetaArgs {
             rotate_by: self.rotate_by,
             tags: list(self.tags),
             source,
+            plain: self.plain,
+            secret: self.secret,
         }
     }
 }
@@ -265,7 +273,8 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
             let patch = meta.into_patch(None);
             if patch.is_empty() {
                 bail!(
-                    "nothing to change: pass --description, --used-by, --owner, --rotate-by or --tag"
+                    "nothing to change: pass --description, --used-by, --owner, --rotate-by, --tag, \
+                     --plain or --secret"
                 );
             }
             backend.put(
@@ -339,6 +348,13 @@ fn describe(backend: &dyn Backend, name: &str) -> Result<()> {
         ("description", m.description),
         ("keys", Some(e.keys.join(", "))),
         (
+            "plain",
+            (!m.plain.is_empty()).then(|| {
+                let keys: Vec<String> = m.plain.into_iter().collect();
+                format!("{} (not secret, never masked)", keys.join(", "))
+            }),
+        ),
+        (
             "unmasked",
             (!e.unmasked.is_empty())
                 .then(|| format!("{} (under {MIN_LEN} bytes)", e.unmasked.join(", "))),
@@ -368,7 +384,11 @@ fn store_entry(
         .into_iter()
         .map(|(k, v)| (k, SecretString::from(v)))
         .collect();
-    let short = short_keys(&values);
+    let patch = meta.into_patch(source);
+    let short: Vec<&str> = short_keys(&values)
+        .into_iter()
+        .filter(|k| !patch.plain.iter().any(|p| p == k))
+        .collect();
     if !short.is_empty() {
         eprintln!(
             "warning: {} under {MIN_LEN} bytes, will not be masked",
@@ -380,7 +400,7 @@ fn store_entry(
         name,
         Put {
             values: Some(values),
-            meta: meta.into_patch(source),
+            meta: patch,
         },
     )?;
     eprintln!("stored {name} ({})", key_count(count));
@@ -400,14 +420,15 @@ fn set_key(
     meta: MetaArgs,
 ) -> Result<()> {
     let values = Values::from([(key.to_string(), SecretString::from(value))]);
-    if !short_keys(&values).is_empty() {
+    let meta = meta.into_patch(None);
+    if !short_keys(&values).is_empty() && !meta.plain.iter().any(|p| p == key) {
         eprintln!("warning: {key} under {MIN_LEN} bytes, will not be masked");
     }
     let keys = backend.merge(
         name,
         Put {
             values: Some(values),
-            meta: meta.into_patch(None),
+            meta,
         },
     )?;
     eprintln!("stored {name}: set {key} ({})", key_count(keys));
@@ -422,7 +443,7 @@ fn run_child(backend: &dyn Backend, specs: &[EnvSpec], command: &[OsString]) -> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for spec in specs {
-        let values = &fetched[&spec.name];
+        let values = &fetched.entries[&spec.name];
         match &spec.key {
             None => {
                 for (k, v) in values {
@@ -551,6 +572,7 @@ fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>, output: &P
         .with_context(|| format!("cannot read {}", template.display()))?;
     let fetched = backend.fetch(Purpose::Render, &Selection::Names(allow))?;
     let ctx: BTreeMap<String, BTreeMap<String, String>> = fetched
+        .entries
         .iter()
         .map(|(name, values)| {
             let values = values
@@ -589,6 +611,7 @@ fn render(backend: &dyn Backend, template: &Path, allow: Vec<String>, output: &P
     let rendered = Zeroizing::new(rendered);
     let read = read.lock().unwrap_or_else(PoisonError::into_inner);
     let unread: Vec<&str> = fetched
+        .entries
         .keys()
         .map(String::as_str)
         .filter(|name| !read.contains(*name))
@@ -623,7 +646,7 @@ fn verify_import(backend: &dyn Backend, dir: &Path) -> Result<ExitCode> {
         let Some((name, values)) = catalog
             .iter()
             .find(|(_, e)| e.meta.source.as_deref() == Some(&source))
-            .and_then(|(name, _)| fetched.get_key_value(name))
+            .and_then(|(name, _)| fetched.entries.get_key_value(name))
         else {
             println!("{file_name}\t-\tNOT IMPORTED");
             all_ok = false;

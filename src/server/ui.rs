@@ -258,6 +258,7 @@ struct EntryRow {
     overdue: bool,
     keys: Vec<String>,
     unmasked: Vec<String>,
+    plain: Vec<String>,
 }
 
 impl EntryRow {
@@ -273,6 +274,7 @@ impl EntryRow {
             overdue: meta.rotate_by.is_some_and(|d| d < today),
             keys: entry.keys,
             unmasked: entry.unmasked,
+            plain: meta.plain.into_iter().collect(),
         }
     }
 }
@@ -343,7 +345,7 @@ impl MetaForm {
             owner: Some(self.owner.trim().into()),
             rotate_by: Some(self.rotate_by.trim().into()),
             tags: Some(list(&self.tags)),
-            source: None,
+            ..MetaPatch::default()
         }
     }
 }

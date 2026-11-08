@@ -1700,3 +1700,107 @@ fn skill_prints_and_installs_the_same_file_for_claude_code_and_codex() {
         assert_eq!(fs::read_to_string(file).unwrap(), printed);
     }
 }
+
+#[test]
+fn a_plain_key_is_injected_and_rendered_but_never_masked() {
+    let home = Home::new();
+    let (password, user) = ("fixture-nas-password-0123", "fixtureuser");
+    let lines = format!("PASS={password}\nUSER={user}\nPORT=5001\n");
+    assert!(
+        home.agentsafe_stdin(&["set", "nas"], &lines)
+            .status
+            .success()
+    );
+    let input = format!("/home/{user}/notes {password}\n");
+    let masked = "/home/***nas***/notes ***nas***\n";
+    assert_eq!(
+        text(&home.agentsafe_stdin(&["scrub"], &input).stdout),
+        masked
+    );
+
+    let out = home.agentsafe(&["edit", "nas", "--plain", "USER", "--plain", "PORT"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let described = text(&home.agentsafe(&["describe", "nas"]).stdout);
+    assert!(
+        described.contains("plain: PORT, USER (not secret, never masked)\n")
+            && !described.contains("unmasked"),
+        "{described}"
+    );
+    let plain_out = format!("/home/{user}/notes ***nas***\n");
+    assert_eq!(
+        text(&home.agentsafe_stdin(&["scrub"], &input).stdout),
+        plain_out
+    );
+    let run = home.agentsafe(&["run", "--env", "nas", "--", "sh", "-c", "echo $USER $PASS"]);
+    assert_eq!(text(&run.stdout), format!("{user} ***nas***\n"));
+
+    let template = home.path("nas.j2");
+    fs::write(&template, "{{ secrets[\"nas\"].USER }}\n").unwrap();
+    let output = home.path("nas.conf");
+    let out = home.agentsafe(&[
+        "render",
+        template.to_str().unwrap(),
+        "--allow",
+        "nas",
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(fs::read_to_string(&output).unwrap(), format!("{user}\n"));
+
+    // Fetching an entry is audited the same whether or not some of its keys are plain.
+    let actions: Vec<String> = home
+        .audit_lines()
+        .iter()
+        .map(|l| l["action"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actions, ["put", "scrub", "edit", "scrub", "run", "render"]);
+
+    let out = home.agentsafe(&["edit", "nas", "--secret", "USER"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&home.agentsafe_stdin(&["scrub"], &input).stdout),
+        masked
+    );
+}
+
+#[test]
+fn a_plain_mark_names_a_key_of_the_entry_and_goes_with_it() {
+    let home = Home::new();
+    let user = "fixtureuser";
+    let set = |args: &[&str], stdin: &str| {
+        let out = home.agentsafe_stdin(args, stdin);
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        text(&out.stderr)
+    };
+    let warned = set(&["set", "nas", "--key", "USER", "--plain", "USER"], user);
+    assert!(!warned.contains("warning"), "{warned}");
+    set(&["set", "nas", "--key", "ID", "--plain", "ID"], "id1");
+    assert!(!text(&home.agentsafe(&["describe", "nas"]).stdout).contains("unmasked"));
+    set(&["set", "nas", "--key", "USER"], user);
+    assert_eq!(text(&home.agentsafe_stdin(&["scrub"], user).stdout), user);
+
+    for (args, error) in [
+        (
+            &["edit", "nas", "--plain", "NOPE"][..],
+            "a plain or secret key is not in the entry",
+        ),
+        (
+            &["edit", "nas", "--plain", "USER", "--secret", "USER"][..],
+            "a key is given as both plain and secret",
+        ),
+    ] {
+        let out = home.agentsafe(args);
+        assert!(!out.status.success());
+        assert!(text(&out.stderr).contains(error), "{}", text(&out.stderr));
+    }
+
+    // A key replaced away loses its mark, so a new value under its name is secret.
+    set(&["set", "nas"], "OTHER=fixture-other-value\n");
+    set(&["set", "nas", "--key", "USER"], user);
+    assert!(!text(&home.agentsafe(&["describe", "nas"]).stdout).contains("plain"));
+    assert_eq!(
+        text(&home.agentsafe_stdin(&["scrub"], user).stdout),
+        "***nas***"
+    );
+}

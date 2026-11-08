@@ -23,13 +23,16 @@
   grammar for every write (0.1.2).
 - Remote mode checked on a real tailnet, and the systemd unit of [deploy.md](deploy.md) under
   systemd.
+- Plain keys: a key marked `--plain` is injected and rendered but never masked, for configuration
+  kept next to a secret; and a Claude Code hook recipe that pipes tool output through `scrub`.
 
 ## Left
 
 - `run` through a pty, for interactive commands: today the child's stdout and stderr are pipes.
 - `export`, to regenerate an env file from the vault, and `export --check`, to report drift
   without printing values.
-- An agent hook that pipes tool output through `agentsafe scrub` before the agent reads it.
+- The agent hook for other agents than Claude Code, and as a command of its own rather than a
+  recipe.
 
 ## Later: short-lived credentials
 

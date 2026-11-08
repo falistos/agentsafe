@@ -48,7 +48,8 @@ Stops:
   written, and no write is made when the audit log cannot be opened. Successful `list` and
   `describe` are not logged; they return no value.
 
-Does not stop: a spelling the masker does not cover, such as base32, upper-case `\uXXXX` escapes or
+Does not stop: a value of a key marked plain, which is never masked (marking needs `put`);
+a spelling the masker does not cover, such as base32, upper-case `\uXXXX` escapes or
 percent-encoding of unreserved characters; a value transformed before printing, written to a file or sent over the network from
 inside `run`, read back from a rendered file, or a value of another entry that the child reads
 elsewhere (`run` does not mask it). On Linux, a child's environment stays readable in

@@ -229,13 +229,13 @@ impl Backend for RemoteBackend {
             Selection::Names(names) => FetchBody::Names { names },
         };
         let answer = self.call(Method::Post, "fetch", Some(&body), None)?;
-        let fetched: Entries<Fetched> = self.json(&answer)?;
+        let fetched: Fetched = self.json(&answer)?;
         if let Selection::Names(names) = selection
             && let Some(missing) = names.iter().find(|n| !fetched.entries.contains_key(*n))
         {
             bail!("the server did not return {missing}");
         }
-        Ok(fetched.entries)
+        Ok(fetched)
     }
 
     fn put(&self, name: &str, put: Put) -> Result<()> {
