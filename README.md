@@ -144,6 +144,37 @@ and remote mode. `describe` lists the plain keys; `--secret KEY` makes one secre
 entry and goes away with it: a key that `set` or `import` replaces away comes back secret. Fetching an entry is
 audited the same whether or not some of its keys are plain. `describe` never prints a plain value either.
 
+### Agent hook
+
+An agent reads more than the output of `agentsafe run`: files, logs, the output of other tools. A hook can pipe
+every tool result through `agentsafe scrub` before the agent reads it. For Claude Code, save this script as
+`agentsafe-claude-hook` on your `PATH` (it needs `jq`):
+
+```sh
+#!/bin/sh
+# Claude Code PostToolUse hook: the tool's result reaches the model with agentsafe values masked.
+# Printing nothing keeps the original result: when nothing matched, or when a step failed.
+in=$(cat) || exit 0
+resp=$(printf '%s' "$in" | jq -c '.tool_response') || exit 0
+masked=$(printf '%s' "$resp" | agentsafe scrub) || exit 0
+[ "$masked" = "$resp" ] && exit 0
+printf '%s' "$masked" | jq -c '{hookSpecificOutput: {hookEventName: "PostToolUse", updatedToolOutput: .}}'
+```
+
+and register it in `~/.claude/settings.json`:
+
+```json
+{"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "agentsafe-claude-hook"}]}]}}
+```
+
+[`updatedToolOutput`](https://code.claude.com/docs/en/hooks#posttooluse-decision-control) must keep the shape of
+the tool's output. The script scrubs the JSON text of `tool_response`, where a value appears JSON-escaped, which
+[masking](#masking) covers, and parses it back, so the shape stays and only strings change. Limits: a step that
+fails (no vault, a server out of reach) lets the original result through; a value split across two JSON
+strings, or spelled in a way masking does not cover, passes; and the hook changes only what the model reads, not
+what the tool did or what Claude Code logged. Mark configuration keys [plain](#plain-keys) first, or the hook
+masks them in every result.
+
 ## Remote mode
 
 On the vault host, `agentsafe serve` listens on a Unix socket behind `tailscale serve --accept-app-caps`,
