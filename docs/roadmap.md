@@ -24,7 +24,7 @@
 - Remote mode checked on a real tailnet, and the systemd unit of [deploy.md](deploy.md) under
   systemd.
 - Plain keys: a key marked `--plain` is injected and rendered but never masked, for configuration
-  kept next to a secret; and a Claude Code hook recipe that pipes tool output through `scrub`.
+  kept next to a secret; and a Claude Code hook recipe that pipes tool output through `scrub` (0.2.0).
 
 ## Left
 

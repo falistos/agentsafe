@@ -37,7 +37,7 @@ Download a binary for Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux
 it against `SHA256SUMS`:
 
 ```sh
-version=v0.1.2 target=aarch64-apple-darwin
+version=v0.2.0 target=aarch64-apple-darwin
 base=https://github.com/falistos/agentsafe/releases/download/$version
 curl -LO $base/agentsafe-$version-$target.tar.gz -LO $base/SHA256SUMS
 shasum -a 256 -c SHA256SUMS --ignore-missing && tar -xzf agentsafe-$version-$target.tar.gz
@@ -45,7 +45,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing && tar -xzf agentsafe-$version-$tar
 
 Then move `agentsafe` to a directory on your `PATH`, for example `~/.local/bin`.
 
-Or build it with Rust 1.89+: `cargo install --locked --git https://github.com/falistos/agentsafe --tag v0.1.2`.
+Or build it with Rust 1.89+: `cargo install --locked --git https://github.com/falistos/agentsafe --tag v0.2.0`.
 
 Teach your agents to use it: `agentsafe skill --install` writes an agent skill for Claude Code
 (`~/.claude/skills`) and for Codex and other Agent Skills readers (`~/.agents/skills`); `agentsafe skill` prints it.
