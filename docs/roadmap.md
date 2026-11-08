@@ -23,6 +23,8 @@
   grammar for every write (0.1.2).
 - Remote mode checked on a real tailnet, and the systemd unit of [deploy.md](deploy.md) under
   systemd.
+- Plain keys: a key marked `--plain` is injected and rendered but never masked, for configuration
+  kept next to a secret.
 
 ## Left
 

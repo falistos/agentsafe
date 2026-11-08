@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -35,6 +35,10 @@ pub struct Meta {
     /// Canonical path of the file the values were imported from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Keys whose value is not secret: injected and rendered, never masked. Always a subset of
+    /// the entry's keys, so a removed key does not come back plain.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub plain: BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -56,7 +60,7 @@ pub struct CatalogEntry {
     #[serde(flatten)]
     pub meta: Meta,
     pub keys: Vec<String>,
-    /// Keys whose value is too short to be masked.
+    /// Secret keys whose value is too short to be masked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unmasked: Vec<String>,
 }
@@ -200,7 +204,9 @@ fn catalog_of(vault: &Vault) -> Catalog {
                 unmasked: e
                     .values
                     .iter()
-                    .filter(|(_, v)| v.expose_secret().len() < MIN_LEN)
+                    .filter(|(k, v)| {
+                        v.expose_secret().len() < MIN_LEN && !e.meta.plain.contains(*k)
+                    })
                     .map(|(k, _)| k.clone())
                     .collect(),
             };

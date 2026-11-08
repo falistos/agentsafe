@@ -1705,3 +1705,88 @@ fn an_invalid_local_grant_stops_serve_at_startup() {
     assert!(err.contains("invalid [[serve.grant]]"), "{err}");
     assert!(!socket.exists());
 }
+
+#[test]
+fn a_plain_key_marked_through_the_api_is_not_masked_by_a_remote_client() {
+    let server = Server::start(Home::local());
+    let user = "fixtureuser";
+    server.home.ok_stdin(
+        &["set", "nas"],
+        &format!("PASS={OTHER_VALUE}\nUSER={user}\n"),
+    );
+    let proxy = Proxy::start(&server.socket);
+    let client = Home::remote(&proxy);
+    let input = format!("/home/{user} {OTHER_VALUE}\n");
+
+    proxy.peer(
+        Some(&caps(r#"{"entries": ["nas"], "actions": ["get"]}"#)),
+        Some("alice@example.com"),
+    );
+    assert!(
+        client
+            .fails(&["edit", "nas", "--plain", "USER"])
+            .contains("403")
+    );
+    assert_eq!(
+        client.ok_stdin(&["scrub"], &input),
+        "/home/***nas*** ***nas***\n"
+    );
+
+    proxy.peer(
+        Some(&caps(r#"{"entries": ["nas"], "actions": ["get", "put"]}"#)),
+        Some("alice@example.com"),
+    );
+    client.ok(&["edit", "nas", "--plain", "USER"]);
+    assert!(
+        client
+            .ok(&["describe", "nas"])
+            .contains("plain: USER (not secret, never masked)\n")
+    );
+    assert_eq!(
+        client.ok_stdin(&["scrub"], &input),
+        format!("/home/{user} ***nas***\n")
+    );
+    let (status, raw) = api(
+        &proxy,
+        "POST",
+        "/api/v1/fetch",
+        Some(r#"{"names": ["nas"]}"#),
+    );
+    assert_eq!(status, 200);
+    assert!(
+        raw.ends_with(r#""plain":{"nas":["USER"]}}"#),
+        "the answer's plain keys"
+    );
+    let (status, _) = api(
+        &proxy,
+        "POST",
+        "/api/v1/fetch",
+        Some(r#"{"names": ["app"]}"#),
+    );
+    assert_eq!(status, 403);
+
+    let actions: Vec<(String, String)> = server
+        .home
+        .audit()
+        .into_iter()
+        .filter(|l| l["via"] == "api")
+        .map(|l| {
+            (
+                l["action"].as_str().unwrap().into(),
+                l["result"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    let line = |a: &str, r: &str| (a.to_string(), r.to_string());
+    assert_eq!(
+        actions,
+        [
+            line("edit", "denied"),
+            line("get", "ok"),
+            line("edit", "ok"),
+            line("get", "ok"),
+            line("get", "ok"),
+            line("get", "denied"),
+        ]
+    );
+}

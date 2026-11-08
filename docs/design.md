@@ -17,8 +17,8 @@ TOKEN = "..."
 ```
 
 Entry names use letters, digits, `.`, `_` and `-`. Metadata fields are `description`, `used_by`,
-`owner`, `rotate_by` (a date), `tags` and `source` (the canonical path `import` read, used by
-`verify-import`).
+`owner`, `rotate_by` (a date), `tags`, `source` (the canonical path `import` read, used by
+`verify-import`) and `plain` (see [Plain keys](#plain-keys)).
 
 The config directory holds:
 
@@ -43,10 +43,30 @@ vault commits the write: if the `catalog.toml` export fails after it, the comman
 and succeeds. Adding a recipient takes effect at the next write, which re-encrypts the vault to the
 new list.
 
+### Plain keys
+
+`plain` lists the keys of the entry whose value is not secret, such as a login name or an endpoint
+URL. Their values are stored, injected and rendered like any other, but the masker of `run` and
+`scrub` leaves them out. Every key is secret unless listed, so a vault written before `plain`
+existed reads as all secret, and a binary that predates it ignores the field, masks everything
+and drops the marks at its next write.
+
+The mark is per key and lives in the entry's metadata, next to the value it qualifies, rather
+than in a separate store of non-secret variables: one entry keeps a login and its password
+together, and a grant on the entry covers both. A write keeps `plain` a subset of the entry's
+keys: `--plain` or `--secret` on a key the entry does not have is refused, and a key that a
+replacing write removes loses its mark, so a later value under that name is secret again. A new
+value for a plain key keeps the mark.
+
+Marking is a metadata write: it needs `put` and is audited as `edit` (or `put` with values). A
+fetch is audited per entry, whatever its keys are: the API returns entries, not keys, and every
+value that leaves still has its line. `list` and `describe` show which keys are plain, never their
+values.
+
 ### Catalog
 
 The catalog is derived from the decrypted vault on every read: metadata, key names, and `unmasked`,
-the keys whose value is under 6 bytes. `catalog.toml` is an export rewritten on every write and
+the secret keys whose value is under 6 bytes. `catalog.toml` is an export rewritten on every write and
 never read back; editing it changes nothing. It is plaintext: names, metadata and key names are not
 treated as secrets.
 
@@ -215,11 +235,14 @@ All paths are under `/api/v1/`. Bodies are JSON, at most 64 KiB. An error answer
 | `GET /api/v1/entries/NAME` | `list` on NAME | `CATALOG_ENTRY`. 403 whether or not the entry exists, when not allowed. |
 | `PUT /api/v1/entries/NAME` | `put` on NAME | Body `{"values": {KEY: VALUE}, "merge": {KEY: VALUE}, "meta": META_PATCH}`, at least one. `values` replaces all of the entry's values; `merge` sets those keys and keeps the others (the entry is created if missing); not both. 204, or with `merge` 200 `{"keys": N}`, the entry's key count. With `meta` only, the entry must exist. |
 | `DELETE /api/v1/entries/NAME` | `admin` on NAME | 204. |
-| `POST /api/v1/fetch` | `get` on each name | Body `{"names": [NAME, ...]}` or `{"all": true}`. `{"entries": {NAME: {KEY: VALUE}}}`. One forbidden name refuses the whole request; `all` returns the entries the caller may get. |
+| `POST /api/v1/fetch` | `get` on each name | Body `{"names": [NAME, ...]}` or `{"all": true}`. `{"entries": {NAME: {KEY: VALUE}}, "plain": {NAME: [KEY]}}`, with `plain` naming the plain keys of the entries that have some, and absent when none has. One forbidden name refuses the whole request; `all` returns the entries the caller may get. |
 
-`CATALOG_ENTRY` is the metadata fields plus `keys` and, when not empty, `unmasked`. `META_PATCH`
-takes `description`, `used_by`, `owner`, `rotate_by` (`YYYY-MM-DD`), `tags` and `source`; an absent
-field is left alone and an empty one clears it.
+`CATALOG_ENTRY` is the metadata fields (`plain` when not empty) plus `keys` and, when not empty,
+`unmasked`. `META_PATCH` takes `description`, `used_by`, `owner`, `rotate_by` (`YYYY-MM-DD`), `tags`
+and `source`, where an absent field is left alone and an empty one clears it, and `plain` and
+`secret`, lists of keys of the entry to mark plain or secret again; other keys keep their mark.
+The client reads a `fetch` answer without `plain` as all secret, so it masks everything against a
+server that predates plain keys.
 
 Statuses: 400 for an invalid name, body or date, 403 for a refusal, 404 for a missing entry, 409
 for a conflict, 413 for a body over the limit, 500 otherwise.

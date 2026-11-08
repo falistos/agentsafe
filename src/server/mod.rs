@@ -3,7 +3,7 @@
 
 mod ui;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
 use std::future::poll_fn;
 use std::io::ErrorKind;
@@ -476,6 +476,13 @@ async fn describe(
     }
 }
 
+#[derive(Serialize)]
+struct FetchAnswer<'a> {
+    entries: BTreeMap<&'a str, Exposed<'a>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    plain: &'a BTreeMap<String, BTreeSet<String>>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FetchBody {
@@ -513,11 +520,16 @@ async fn fetch(
         b.fetch_as(&caller, Purpose::Get, &Selection::Names(names))
     })
     .await?;
-    let entries: BTreeMap<&str, Exposed<'_>> = fetched
+    let entries = fetched
+        .entries
         .iter()
         .map(|(name, values)| (name.as_str(), Exposed(values)))
         .collect();
-    Ok(json(StatusCode::OK, &Entries { entries }))
+    let answer = FetchAnswer {
+        entries,
+        plain: &fetched.plain,
+    };
+    Ok(json(StatusCode::OK, &answer))
 }
 
 #[derive(Deserialize)]

@@ -4,6 +4,7 @@
 <h1>{{ e.name }}</h1>
 <p class="muted">Keys:
 {% for k in e.keys %}<code>{{ k }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+{% if e.plain %}<br>Not secret, never masked: {% for k in e.plain %}<code>{{ k }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
 {% if e.unmasked %}<br>Too short to be masked: {% for k in e.unmasked %}<code>{{ k }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
 {% if e.overdue %}<br><span class="overdue">Rotation was due {{ e.rotate_by }}.</span>{% endif %}
 </p>

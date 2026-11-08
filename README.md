@@ -79,10 +79,10 @@ agentsafe scrub < app.env
 |---|---|
 | `agentsafe init [--server URL]` | Creates the config and, without `--server`, an age identity and an empty vault. Never overwrites. |
 | `agentsafe list` | Entries with key count, owner, rotation date, tags, description. |
-| `agentsafe describe NAME` | One entry's metadata and key names, and which keys are too short to mask. |
+| `agentsafe describe NAME` | One entry's metadata and key names, and which keys are plain or too short to mask. |
 | `agentsafe set NAME [--key KEY]` | Stores values read from stdin: `KEY=VALUE` lines (refused when no key has a value), or with `--key`, all of stdin (minus one trailing newline) as the value of `KEY`, which is set while the entry's other keys and metadata stay. Every write takes keys `[A-Za-z0-9_.-]` not starting with a digit. |
 | `agentsafe import FILE --name NAME` | Stores a `.env` file (`export`, quotes, comments; keys `[A-Za-z0-9_.-]`; no `$VAR` expansion; refused when no key has a value, as a lone padded base64 token). |
-| `agentsafe edit NAME` | Changes metadata only. Needs at least one metadata flag. |
+| `agentsafe edit NAME` | Changes metadata only, plain marks included. Needs at least one metadata flag. |
 | `agentsafe rm NAME` | Deletes an entry. |
 | `agentsafe run --env NAME[:KEY[=VAR]] … -- CMD ARGS` | Runs `CMD` with the values in its environment, its stdout and stderr masked. Exits with the child's code. |
 | `agentsafe render TEMPLATE --allow NAME … -o FILE` | Renders a minijinja template where `secrets["NAME"].KEY` reads allowed entries (an `--allow`ed entry the template never reads is an error) into a new 0600 file that replaces `FILE` atomically. |
@@ -92,7 +92,9 @@ agentsafe scrub < app.env
 | `agentsafe serve [--socket PATH]` | Serves the local vault over HTTP on a Unix socket for `tailscale serve`. |
 
 `set`, `import` and `edit` take `--description`, `--owner`, `--rotate-by YYYY-MM-DD`, and repeatable `--used-by`
-and `--tag`; an empty value clears the field (`--tag ''`). `$AGENTSAFE_CONFIG` overrides the config path.
+and `--tag`; an empty value clears the field (`--tag ''`). They also take repeatable `--plain KEY` and `--secret KEY`,
+which mark a key of the entry as [plain](#plain-keys) or secret again and leave the other keys' marks alone.
+`$AGENTSAFE_CONFIG` overrides the config path.
 
 </details>
 
@@ -100,7 +102,7 @@ and `--tag`; an empty value clears the field (`--tag ''`). `$AGENTSAFE_CONFIG` o
 
 `run` masks the values of the entries named in `--env`, every key of them even when only one key is injected.
 `scrub` masks every entry the caller may get: all of them in local mode, those it has `get` on in remote mode.
-Matching is streamed, so a value split across reads is still masked.
+Matching is streamed, so a value split across reads is still masked. Every key is secret unless marked [plain](#plain-keys).
 
 <details>
 <summary>The spellings covered, and the gaps</summary>
@@ -125,6 +127,22 @@ Values and encoded forms shorter than 6 bytes are not masked: they occur in ordi
 would corrupt it. `set` warns about them and `describe` lists them.
 
 </details>
+
+### Plain keys
+
+An entry often keeps configuration next to its secret: a login name next to its password, an endpoint URL, a
+region, an OAuth client id. Masked, such a value corrupts ordinary output: a login name that is also the local
+user name turns every home path into `/home/***nas***/...`. Mark that key plain:
+
+```sh
+agentsafe edit nas --plain USER
+echo https://s3.example.com | agentsafe set storage --key ENDPOINT --plain ENDPOINT
+```
+
+A plain key is injected by `run` and written by `render` as before, but `run` and `scrub` never mask it, in local
+and remote mode. `describe` lists the plain keys; `--secret KEY` makes one secret again. A mark names a key of the
+entry and goes away with it: a key that `set` or `import` replaces away comes back secret. Fetching an entry is
+audited the same whether or not some of its keys are plain. `describe` never prints a plain value either.
 
 ## Remote mode
 
