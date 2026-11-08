@@ -1783,11 +1783,11 @@ fn a_plain_mark_names_a_key_of_the_entry_and_goes_with_it() {
     for (args, error) in [
         (
             &["edit", "nas", "--plain", "NOPE"][..],
-            "the entry has no key NOPE",
+            "a plain or secret key is not in the entry",
         ),
         (
             &["edit", "nas", "--plain", "USER", "--secret", "USER"][..],
-            "USER is given as plain and secret",
+            "a key is given as both plain and secret",
         ),
     ] {
         let out = home.agentsafe(args);

@@ -116,12 +116,17 @@ impl MetaPatch {
                 Refusal::Invalid("invalid rotate-by: use YYYY-MM-DD".into())
             })?)),
         };
+        // Neither error quotes the key: a value given by mistake would reach API answers and the audit log.
         for key in self.plain.iter().chain(&self.secret) {
             if !entry.values.contains_key(key) {
-                return Err(Refusal::Invalid(format!("the entry has no key {key}")).into());
+                return Err(
+                    Refusal::Invalid("a plain or secret key is not in the entry".into()).into(),
+                );
             }
             if self.plain.contains(key) && self.secret.contains(key) {
-                return Err(Refusal::Invalid(format!("{key} is given as plain and secret")).into());
+                return Err(
+                    Refusal::Invalid("a key is given as both plain and secret".into()).into(),
+                );
             }
         }
         let meta = &mut entry.meta;
