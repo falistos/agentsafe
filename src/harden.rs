@@ -1,17 +1,16 @@
 //! Kernel restrictions on the agentsafe process itself.
 
 use anyhow::{Context, Result};
-use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+use rustix::process::{Resource, Rlimit, setrlimit};
 
 /// No core dump, and on Linux no same-user ptrace or `/proc/PID/mem` read: any of them would
-/// expose decrypted values. A child of `run` inherits the core limit as its soft limit only.
+/// expose decrypted values. The hard limit is 0 too, so a child of `run` cannot raise it.
 pub fn process() -> Result<()> {
-    let core = getrlimit(Resource::Core);
     setrlimit(
         Resource::Core,
         Rlimit {
             current: Some(0),
-            maximum: core.maximum,
+            maximum: Some(0),
         },
     )
     .context("cannot disable core dumps")?;

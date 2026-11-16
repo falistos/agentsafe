@@ -31,19 +31,22 @@ Stops:
   values from stdin or a file, never from arguments.
 - `run` masks the values of the entries it injects in the child's stdout and stderr; `scrub` masks
   every entry the caller may get. Both cover the raw value; base64, standard and URL-safe, at the
-  three alignments a value can have inside a larger blob; hex, lower and upper case; JSON as
-  `serde_json` escapes it, also with non-ASCII characters as lower-case `\uXXXX` (surrogate pairs
-  above U+FFFF, as Python's `json.dumps` writes them), with `/` as `\/`, or both; and
-  percent-encoding with upper- or lower-case hex (`A-Z a-z 0-9 - . _ ~` left as is).
+  three alignments a value can have inside a larger blob, including with `\n` or `\r` between the
+  encoded characters; hex, lower and upper case; JSON as `serde_json` escapes it, also with
+  non-ASCII characters as lower-case `\uXXXX` (surrogate pairs above U+FFFF, as Python's
+  `json.dumps` writes them), with `/` as `\/`, or both, and with `&`, `<` and `>` as `\u0026`,
+  `\u003c` and `\u003e`; and percent-encoding with upper- or lower-case hex (`A-Z a-z 0-9 - . _ ~`
+  left as is, and the same with `! * ' ( )` left as is).
 - `render -o FILE` writes a new file created 0600 and renames it over FILE, so a process that had
   opened the old FILE never reads the values. A missing vault is an error, so `scrub` never passes
   text through unmasked because the vault was lost.
 - Error messages never quote a value: `.env` errors give a line number, template errors give the
   kind and the line, config errors give the line, the column and the kind, a vault that does not
   parse is reported without its content, API errors never echo the request body.
-- Every agentsafe process sets its core dump limit to 0 and, on Linux, makes itself
-  non-dumpable: the agent cannot read its memory or `/proc/PID/environ`, nor attach a debugger,
-  as the same user. A child of `run` starts with a soft core limit of 0.
+- Every agentsafe process sets its soft and hard core dump limits to 0 and, on Linux, makes
+  itself non-dumpable: the agent cannot read its memory or `/proc/PID/environ`, nor attach a
+  debugger, as the same user. A child of `run` inherits both limits, so it cannot raise the core
+  size and dump.
 - Every value fetch and write is audited. No value is released when its audit line cannot be
   written, and no write is made when the audit log cannot be opened. Successful `list` and
   `describe` are not logged; they return no value.

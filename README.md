@@ -110,12 +110,15 @@ Matching is streamed, so a value split across reads is still masked. Every key i
 These spellings of a value are covered, and only these:
 
 - the raw bytes;
-- base64, standard and URL-safe, at the three byte alignments a value can have inside a larger blob;
+- base64, standard and URL-safe, at the three byte alignments a value can have inside a larger blob,
+  including when `\n` or `\r` sits between those characters (a wrapped encoding, at any column width);
 - hexadecimal, lower case and upper case;
 - JSON as `serde_json` writes it (`"` and `\` escaped with a backslash, control characters as `\n`, `\t` and the
   like or `\u00XX`, every other character as is), also with non-ASCII characters as lower-case `\uXXXX`
-  (surrogate pairs above U+FFFF, as Python's `json.dumps` writes them), with `/` as `\/`, or both;
-- percent-encoding with upper- or lower-case hex: every byte except `A-Z a-z 0-9 - . _ ~` as `%XX`.
+  (surrogate pairs above U+FFFF, as Python's `json.dumps` writes them), with `/` as `\/`, or both, and with
+  `&`, `<` and `>` as `\u0026`, `\u003c` and `\u003e` (as Go's `encoding/json` writes them);
+- percent-encoding with upper- or lower-case hex: every byte except `A-Z a-z 0-9 - . _ ~` as `%XX`, and the
+  same with `! * ' ( )` also left as is (as JavaScript's `encodeURIComponent` does).
 
 Other spellings of the same text pass unmasked, for example upper-case `\uXXXX` escapes, `+` for a space, or a
 URL encoder that leaves `/` or `:` as is.
@@ -127,6 +130,14 @@ Values and encoded forms shorter than 6 bytes are not masked: they occur in ordi
 would corrupt it. `set` warns about them and `describe` lists them.
 
 </details>
+
+### Limits
+
+- `run` masks stdout and stderr on their own. A value cut so that one part is written to each is not a
+  pattern on either stream; a transcript that joins the two can put it back together.
+- On Linux, `serve`'s Landlock ruleset handles file access and `BindTcp`, not `ConnectTcp`. A fault in
+  `serve` can open an outbound TCP connection. The ruleset still cannot bind a port or read outside its
+  directories.
 
 ### Plain keys
 

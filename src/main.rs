@@ -253,7 +253,7 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
                 .read_to_string(&mut input)
                 .context("stdin is not UTF-8 text")?;
             if let Some(key) = key {
-                let value = input.strip_suffix('\n').unwrap_or(&input);
+                let value = without_final_newline(&input);
                 set_key(backend, &name, &key, value, meta)?;
             } else {
                 let values = dotenv::parse(&input).context("stdin")?;
@@ -409,6 +409,14 @@ fn store_entry(
 
 fn key_count(n: usize) -> String {
     format!("{n} key{}", if n == 1 { "" } else { "s" })
+}
+
+/// One trailing LF, or the CR of a trailing CRLF. A bare CR stays, as `dotenv::parse` keeps it.
+fn without_final_newline(input: &str) -> &str {
+    let Some(stripped) = input.strip_suffix('\n') else {
+        return input;
+    };
+    stripped.strip_suffix('\r').unwrap_or(stripped)
 }
 
 /// Sets one key of an entry and keeps its other keys.

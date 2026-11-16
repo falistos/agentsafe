@@ -1,8 +1,3 @@
-#![expect(
-    clippy::unwrap_used,
-    reason = "a fixture or setup step that fails must panic the test, as unwrap does"
-)]
-
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, File};
@@ -146,11 +141,11 @@ fn run_is_not_dumpable() {
     home.import_fixtures();
     let (probe, expected) = if cfg!(target_os = "linux") {
         (
-            "ulimit -c; cat /proc/$PPID/environ >/dev/null 2>&1 && echo readable || echo denied",
-            "0\ndenied\n",
+            "ulimit -Sc; ulimit -Hc; cat /proc/$PPID/environ >/dev/null 2>&1 && echo readable || echo denied",
+            "0\n0\ndenied\n",
         )
     } else {
-        ("ulimit -c", "0\n")
+        ("ulimit -Sc; ulimit -Hc", "0\n0\n")
     };
     // The soft limit raised first, so that the 0 comes from agentsafe, not from the test host.
     let out = Command::new("sh")
@@ -1659,6 +1654,141 @@ fn run_and_scrub_mask_the_extra_json_and_percent_spellings() {
         let out = home.agentsafe_stdin(&["scrub"], &format!("<{spelling}>\n"));
         assert_eq!(text(&out.stdout), "<***uni***>\n", "{spelling}");
     }
+}
+
+fn wrap_columns(encoded: &str, width: usize, sep: &str) -> String {
+    let mut out = String::new();
+    for (i, chunk) in encoded.as_bytes().chunks(width).enumerate() {
+        if i > 0 {
+            out.push_str(sep);
+        }
+        out.push_str(std::str::from_utf8(chunk).unwrap());
+    }
+    out
+}
+
+#[test]
+fn run_and_scrub_mask_wrapped_base64() {
+    let home = Home::new();
+    let mut value = String::new();
+    for i in 0..20 {
+        write!(value, "{i:04x}-wrap+").unwrap();
+    }
+    while !value.len().is_multiple_of(3) {
+        value.push('x');
+    }
+    assert!(value.len() > 57, "{}", value.len());
+    let out = home.agentsafe_stdin(&["set", "wrap", "--key", "V"], &value);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let encoded = STANDARD.encode(&value);
+    for (width, sep) in [(64usize, "\n"), (76, "\r\n")] {
+        let wrapped = wrap_columns(&encoded, width, sep);
+        assert!(wrapped.contains(sep));
+        let scrubbed = text(&home.agentsafe_stdin(&["scrub"], &wrapped).stdout);
+        assert_eq!(scrubbed, "***wrap***", "scrub width {width} sep {sep:?}");
+        let run = home.agentsafe(&[
+            "run",
+            "--env",
+            "wrap",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s' \"$1\"",
+            "sh",
+            &wrapped,
+        ]);
+        assert!(run.status.success(), "{}", text(&run.stderr));
+        assert_eq!(
+            text(&run.stdout),
+            "***wrap***",
+            "run width {width} sep {sep:?}"
+        );
+    }
+}
+
+#[test]
+fn set_key_strips_a_final_crlf_and_keeps_a_bare_cr() {
+    let home = Home::new();
+    let store = |name: &str, stdin: &str, script: &str| {
+        let out = home.agentsafe_stdin(&["set", name, "--key", "V"], stdin);
+        assert!(out.status.success(), "{name}: {}", text(&out.stderr));
+        let out = home.agentsafe(&["run", "--env", name, "--", "sh", "-c", script]);
+        assert_eq!(text(&out.stdout), "same\n", "{name}: {}", text(&out.stderr));
+    };
+    store(
+        "lf",
+        "crlf-key-value-lf01\n",
+        "test \"$V\" = 'crlf-key-value-lf01' && echo same",
+    );
+    store(
+        "crlf",
+        "crlf-key-value-cr02\r\n",
+        "test \"$V\" = 'crlf-key-value-cr02' && echo same",
+    );
+    store(
+        "bare",
+        "crlf-key-value-bare\r",
+        "test \"$V\" = \"$(printf 'crlf-key-value-bare\\r')\" && echo same",
+    );
+    let out = home.agentsafe_stdin(&["set", "two", "--key", "V"], "crlf-key-value-two3\n\n");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    // One trailing LF only, so the stored value keeps a newline of its own.
+    assert_eq!(
+        text(
+            &home
+                .agentsafe_stdin(&["scrub"], "crlf-key-value-two3\n")
+                .stdout
+        ),
+        "***two***"
+    );
+    assert_eq!(
+        text(
+            &home
+                .agentsafe_stdin(&["scrub"], "crlf-key-value-two3")
+                .stdout
+        ),
+        "crlf-key-value-two3"
+    );
+    assert_eq!(
+        text(
+            &home
+                .agentsafe_stdin(&["scrub"], "crlf-key-value-two3\n\n")
+                .stdout
+        ),
+        "***two***\n"
+    );
+    assert_eq!(
+        text(
+            &home
+                .agentsafe_stdin(&["scrub"], "crlf-key-value-cr02")
+                .stdout
+        ),
+        "***crlf***"
+    );
+    assert_eq!(
+        text(
+            &home
+                .agentsafe_stdin(&["scrub"], "crlf-key-value-cr02\r")
+                .stdout
+        ),
+        "***crlf***\r"
+    );
+    assert_eq!(
+        text(
+            &home
+                .agentsafe_stdin(&["scrub"], "crlf-key-value-bare")
+                .stdout
+        ),
+        "crlf-key-value-bare"
+    );
+    assert_eq!(
+        text(
+            &home
+                .agentsafe_stdin(&["scrub"], "crlf-key-value-bare\r")
+                .stdout
+        ),
+        "***bare***"
+    );
 }
 
 #[test]
