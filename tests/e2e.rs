@@ -1,8 +1,3 @@
-#![expect(
-    clippy::unwrap_used,
-    reason = "a fixture or setup step that fails must panic the test, as unwrap does"
-)]
-
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, File};
