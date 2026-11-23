@@ -6,11 +6,6 @@
 //! Left out because showing the value is the product's job: the file `render -o` writes, a UI
 //! reveal of the marker, and a `reveal` reason, which is audited as written.
 
-#![expect(
-    clippy::unwrap_used,
-    reason = "a fixture or setup step that fails must panic the test, as unwrap does"
-)]
-
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Write;

@@ -1,10 +1,5 @@
 //! `agentsafe serve` behind a stand-in for `tailscale serve`, and the CLI in remote mode.
 
-#![expect(
-    clippy::unwrap_used,
-    reason = "a fixture or setup step that fails must panic the test, as unwrap does"
-)]
-
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
